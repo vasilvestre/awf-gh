@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 )
 
 func main() {
@@ -96,6 +97,16 @@ func (w *watcher) poll() error {
 		for _, p := range prs {
 			if p.IsDraft || rc.ignores(p.Author.Login) || !rc.allows(p.Author.Login) {
 				continue
+			}
+			// Inline review comments never appear in `gh pr list`, and they cost
+			// one call per pull request, so they are fetched only where a review
+			// exists and nothing else already needs an answer.
+			if slices.Contains(rc.On, EventReviewComment) && len(p.Reviews) > 0 && !p.answerable() {
+				cs, err := inlineComments(rc.Repo, p.Number)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "awf-gh: %s#%d inline comments: %v\n", rc.Repo, p.Number, err)
+				}
+				p.Inline = cs
 			}
 			stop, err := w.handle(rc, p)
 			if err != nil {
