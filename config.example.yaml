@@ -1,0 +1,31 @@
+# awf-gh polls open pull requests and turns them into awf workflow runs.
+#
+# Copy to ~/.config/awf-gh/config.yaml, then:
+#   awf-gh --seed        # once, so the existing backlog is not reviewed
+#   awf-gh --dry-run     # check what fires
+#   awf-gh               # one pass; put it in a systemd timer
+
+awf_url: http://127.0.0.1:8080
+state_path: ~/.local/state/awf-gh/seen.jsonl
+
+# Hard cap per pass: a public repo can receive PRs faster than you can pay
+# for reviews.
+max_per_run: 3
+
+repos:
+  - repo: awf-project/cli
+    scope: local
+    workflow: review-pr
+    on: [pr-opened, pr-updated, checks-failed]
+    ignore_authors: ["dependabot[bot]", "renovate[bot]", "github-actions[bot]"]
+
+  - repo: awf-project/tower
+    workflow: review-pr
+    on: [pr-opened]
+
+  # Answer review comments on your own PRs. only_authors keeps other people's
+  # PRs out; review-comment fires once per new comment.
+  - repo: your-org/your-repo
+    workflow: reply-pr
+    on: [review-comment]
+    only_authors: ["your-login"]
