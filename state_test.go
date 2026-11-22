@@ -40,8 +40,11 @@ func TestPREvents(t *testing.T) {
 	green := pr{Number: 2, StatusCheckRollup: []check{{Conclusion: "SUCCESS"}}}
 	legacy := pr{Number: 3, StatusCheckRollup: []check{{State: "ERROR"}}}
 
-	if got := red.events(allEvents); len(got) != 3 {
-		t.Errorf("failing PR events = %v, want all three", got)
+	if got := red.events(allEvents); len(got) != 2 {
+		t.Errorf("failing PR events = %v, want pr-opened and checks-failed only", got)
+	}
+	if got := red.events([]string{EventChecksFailed, EventUpdated}); len(got) != 1 || got[0] != EventChecksFailed {
+		t.Errorf("failing PR events = %v, want checks-failed alone", got)
 	}
 	if green.failing() {
 		t.Error("green PR reported as failing")

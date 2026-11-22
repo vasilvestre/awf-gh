@@ -79,11 +79,12 @@ func (p pr) events(wanted []string) []string {
 	if slices.Contains(wanted, EventOpened) {
 		out = append(out, EventOpened)
 	}
-	if slices.Contains(wanted, EventUpdated) {
-		out = append(out, EventUpdated)
-	}
+	// A red check and a push of the same commit are one review: the run with
+	// the logs supersedes the run without, so pr-updated is dropped then.
 	if slices.Contains(wanted, EventChecksFailed) && p.failing() {
 		out = append(out, EventChecksFailed)
+	} else if slices.Contains(wanted, EventUpdated) {
+		out = append(out, EventUpdated)
 	}
 	if slices.Contains(wanted, EventReviewComment) && p.answerable() {
 		out = append(out, EventReviewComment)
