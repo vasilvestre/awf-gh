@@ -234,4 +234,18 @@ func TestBotCommentsAreNotAnswerable(t *testing.T) {
 	if p.answerable() {
 		t.Fatal("a bot receipt raised a review-comment event")
 	}
+
+	// A bot receipt after a reviewer must not hide the review behind it.
+	q := pr{Number: 9, HeadRefOid: "sha", Author: me, Comments: []comment{
+		{ID: "c1", Author: author{Login: "reviewer"}, Body: "one nit",
+			CreatedAt: "2026-11-22T10:00:00Z"},
+		{ID: "c2", Author: author{Login: "codex-connector[bot]"}, Body: "receipt",
+			CreatedAt: "2026-11-22T11:00:00Z"},
+	}}
+	if !q.answerable() {
+		t.Fatal("a bot receipt hid the reviewer comment behind it")
+	}
+	if got := q.ref(EventReviewComment); got != "c1" {
+		t.Fatalf("ref = %q, want the reviewer comment c1", got)
+	}
 }
