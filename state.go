@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -72,4 +73,32 @@ func (s *state) add(key string) error {
 	}
 	s.seen[key] = struct{}{}
 	return nil
+}
+
+// forget drops every key containing match and rewrites the file. The next poll
+// treats those keys as new, which is how one comment gets replayed by hand.
+func (s *state) forget(match string) (int, error) {
+	var kept []string
+	dropped := 0
+	for key := range s.seen {
+		if strings.Contains(key, match) {
+			delete(s.seen, key)
+			dropped++
+			continue
+		}
+		kept = append(kept, key)
+	}
+	if dropped == 0 {
+		return 0, nil
+	}
+	sort.Strings(kept)
+	body := strings.Join(kept, "\n")
+	if body != "" {
+		body += "\n"
+	}
+	tmp := s.path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(body), 0o644); err != nil {
+		return 0, err
+	}
+	return dropped, os.Rename(tmp, s.path)
 }

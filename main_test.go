@@ -141,3 +141,43 @@ func TestReviewCommentFiresOncePerComment(t *testing.T) {
 		t.Fatalf("own reply dispatched: %v", doer.calls[1:])
 	}
 }
+
+func TestForgetDropsOnlyMatchingKeys(t *testing.T) {
+	path := t.TempDir() + "/seen.jsonl"
+	st := newState(path)
+	keys := []string{
+		"o/r#5#seen",
+		"o/r#5#review-comment@111",
+		"o/r#5#review-comment@222",
+	}
+	for _, k := range keys {
+		if err := st.add(k); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	n, err := st.forget("222")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("forgot %d keys, want 1", n)
+	}
+
+	reloaded, err := loadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.has("o/r#5#review-comment@222") {
+		t.Fatal("forgotten key is still recorded")
+	}
+	for _, k := range keys[:2] {
+		if !reloaded.has(k) {
+			t.Fatalf("%q disappeared along with the forgotten key", k)
+		}
+	}
+
+	if n, err := st.forget("nothing-matches"); err != nil || n != 0 {
+		t.Fatalf("forget with no match = %d, %v; want 0, nil", n, err)
+	}
+}

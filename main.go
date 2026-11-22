@@ -23,6 +23,7 @@ func run() error {
 		cfgPath = flag.String("config", defaultConfigPath(), "path to config.yaml")
 		dryRun  = flag.Bool("dry-run", false, "print what would be dispatched, record nothing")
 		seed    = flag.Bool("seed", false, "record the current PRs as seen without dispatching (first run)")
+		forget  = flag.String("forget", "", "drop recorded keys containing this text (a comment id, or repo#number), then exit")
 	)
 	flag.Parse()
 
@@ -32,6 +33,25 @@ func run() error {
 	}
 
 	st, err := loadState(cfg.StatePath)
+	if *forget != "" {
+		// Forgetting a whole repo#number also drops the "seen" marker, and a PR
+		// seen for the first time only fires pr-opened. Forget the comment id.
+		switch {
+		case errors.Is(err, errNoState):
+			return fmt.Errorf("%w: nothing to forget in %s", err, cfg.StatePath)
+		case err != nil:
+			return err
+		}
+		n, err := st.forget(*forget)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return fmt.Errorf("no key matches %q in %s", *forget, cfg.StatePath)
+		}
+		fmt.Printf("forgot %d key(s) matching %q, the next run replays them\n", n, *forget)
+		return nil
+	}
 	switch {
 	case *seed || *dryRun:
 		// Both report the full picture, so they start from an empty set.
