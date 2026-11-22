@@ -223,3 +223,15 @@ func TestReviewBodyAndInlineCommentsAreAnswerable(t *testing.T) {
 		t.Fatal("my own inline reply still looks answerable")
 	}
 }
+
+func TestBotCommentsAreNotAnswerable(t *testing.T) {
+	me := author{Login: "me"}
+	p := pr{Number: 8, HeadRefOid: "sha", Author: me, Comments: []comment{
+		{ID: "c1", Author: me, Body: "done", CreatedAt: "2026-11-22T10:00:00Z"},
+		{ID: "c2", Author: author{Login: "codex-connector[bot]"}, Body: "receipt",
+			CreatedAt: "2026-11-22T11:00:00Z"},
+	}}
+	if p.answerable() {
+		t.Fatal("a bot receipt raised a review-comment event")
+	}
+}

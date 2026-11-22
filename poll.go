@@ -116,7 +116,11 @@ func (p pr) newest() (comment, bool) {
 // comment ends the streak, so the event does not loop.
 func (p pr) answerable() bool {
 	c, ok := p.newest()
-	return ok && c.Author.Login != p.Author.Login
+	if !ok || c.Author.Login == p.Author.Login {
+		return false
+	}
+	// A bot posts receipts and status lines, not remarks to answer.
+	return !strings.HasSuffix(c.Author.Login, "[bot]")
 }
 
 // ref is the dedup payload: the head commit for the commit events, the newest
