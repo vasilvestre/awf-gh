@@ -43,6 +43,7 @@ cp config.example.yaml ~/.config/awf-gh/config.yaml
 | `repos[].on` | Events to fire on, default `[pr-opened, pr-updated]` |
 | `repos[].ignore_authors` | Logins to skip, such as bots |
 | `repos[].only_authors` | When set, watch only PRs by these logins |
+| `repos[].labels` | Labels that fire `issue-labeled`; required with that event |
 
 Events:
 
@@ -52,8 +53,15 @@ Events:
 - `review-comment`: the newest comment on the PR is not written by the PR
   author. The event fires once per comment id, so your own reply ends the
   streak and the same comment never fires twice.
+- `issue-labeled`: an open issue carries one of `repos[].labels`. The event
+  fires once per issue and label, so adding the label again is silent; use
+  `--forget 'owner/repo#issue2'` to replay it. The inputs are `repo`, `issue`,
+  `label` and `event`, not a pull request number.
 
-Drafts and ignored authors are skipped before any event is computed. A PR that
+Drafts and ignored authors are skipped before any event is computed. Issues go
+through the same author filters, which matters: on your own repositories the
+issues `tend-repo` files are written by you, so `ignore_authors` must not list
+your own login. A PR that
 `only_authors` rejects is skipped the same way. The first sight of a PR only
 fires `pr-opened`; the other events wait for their next change.
 

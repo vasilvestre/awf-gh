@@ -14,9 +14,10 @@ const (
 	EventUpdated       = "pr-updated"
 	EventChecksFailed  = "checks-failed"
 	EventReviewComment = "review-comment"
+	EventIssueLabeled  = "issue-labeled"
 )
 
-var allEvents = []string{EventOpened, EventUpdated, EventChecksFailed, EventReviewComment}
+var allEvents = []string{EventOpened, EventUpdated, EventChecksFailed, EventReviewComment, EventIssueLabeled}
 
 // pr keeps only the fields the dedup key needs. Reading the body or the diff
 // is the workflow's job, not the watcher's.
@@ -189,4 +190,57 @@ func inlineComments(repo string, number int) ([]comment, error) {
 		return nil, fmt.Errorf("gh api: %w", err)
 	}
 	return cs, nil
+}
+
+// issue keeps what the label trigger needs: the number for the key and the
+// inputs, the labels to match, the author for the same filters as pull
+// requests.
+type issue struct {
+	Number int     `json:"number"`
+	Title  string  `json:"title"`
+	Labels []label `json:"labels"`
+	Author author  `json:"author"`
+}
+
+type label struct {
+	Name string `json:"name"`
+}
+
+// labels returns the labels present on the issue and asked for by the config,
+// in config order, so the dispatch order is stable.
+func (i issue) labels(wanted []string) []string {
+	var out []string
+	for _, want := range wanted {
+		if slices.ContainsFunc(i.Labels, func(l label) bool { return l.Name == want }) {
+			out = append(out, want)
+		}
+	}
+	return out
+}
+
+// issueKey is the dedup identity: one dispatch per issue and label. Adding the
+// label again does not fire twice; `--forget repo#issue<N>` replays it.
+func issueKey(repo string, number int, label string) string {
+	return fmt.Sprintf("%s#issue%d#%s@%s", repo, number, EventIssueLabeled, label)
+}
+
+func listIssues(repo string) ([]issue, error) {
+	cmd := exec.Command("gh", "issue", "list",
+		"--repo", repo,
+		"--state", "open",
+		"--limit", "100",
+		"--json", "number,title,labels,author",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("gh issue list: %s", ee.Stderr)
+		}
+		return nil, err
+	}
+	var issues []issue
+	if err := json.Unmarshal(out, &issues); err != nil {
+		return nil, fmt.Errorf("gh issue list: %w", err)
+	}
+	return issues, nil
 }
