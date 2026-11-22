@@ -101,6 +101,11 @@ func (p pr) newest() (comment, bool) {
 			if c.ID == "" || (c.Body != "" && strings.TrimSpace(c.Body) == "") {
 				continue
 			}
+			// A bot posts receipts and status lines, not remarks to answer. Skipping
+			// it here keeps answerable() and ref() reading the same feedback.
+			if strings.HasSuffix(c.Author.Login, "[bot]") {
+				continue
+			}
 			// Ties keep the later entry: list order is chronological inside one
 			// source, and a review is newer than the comment it answers.
 			if !found || !c.at().Before(best.at()) {
@@ -116,11 +121,7 @@ func (p pr) newest() (comment, bool) {
 // comment ends the streak, so the event does not loop.
 func (p pr) answerable() bool {
 	c, ok := p.newest()
-	if !ok || c.Author.Login == p.Author.Login {
-		return false
-	}
-	// A bot posts receipts and status lines, not remarks to answer.
-	return !strings.HasSuffix(c.Author.Login, "[bot]")
+	return ok && c.Author.Login != p.Author.Login
 }
 
 // ref is the dedup payload: the head commit for the commit events, the newest
