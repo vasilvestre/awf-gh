@@ -53,11 +53,15 @@ func run() error {
 		return nil
 	}
 	switch {
-	case *seed || *dryRun:
-		// Both report the full picture, so they start from an empty set.
+	case *seed:
+		// Seeding reports the full picture, so it starts from an empty set.
 		st = newState(cfg.StatePath)
 	case errors.Is(err, errNoState):
-		return fmt.Errorf("%w; run once with --seed to skip the existing backlog", err)
+		if !*dryRun {
+			return fmt.Errorf("%w; run once with --seed to skip the existing backlog", err)
+		}
+		// A dry run has nothing recorded yet, so it reports the backlog.
+		st = newState(cfg.StatePath)
 	case err != nil:
 		return err
 	}
