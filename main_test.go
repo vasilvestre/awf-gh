@@ -181,3 +181,45 @@ func TestForgetDropsOnlyMatchingKeys(t *testing.T) {
 		t.Fatalf("forget with no match = %d, %v; want 0, nil", n, err)
 	}
 }
+
+func TestReviewBodyAndInlineCommentsAreAnswerable(t *testing.T) {
+	me := author{Login: "me"}
+	them := author{Login: "them"}
+	base := pr{Number: 7, HeadRefOid: "sha", Author: me, Comments: []comment{
+		{ID: "IC_1", Author: them, Body: "look", CreatedAt: "2026-11-22T10:00:00Z"},
+		{ID: "IC_2", Author: me, Body: "done", CreatedAt: "2026-11-22T11:00:00Z"},
+	}}
+
+	// My reply closes the streak, so the newer review body is what is owed.
+	withReview := base
+	withReview.Reviews = []comment{
+		{ID: "PRR_1", Author: them, Body: "one nit", Submitted: "2026-11-22T12:00:00Z"},
+	}
+	if !withReview.answerable() {
+		t.Fatal("review body after my comment is not answerable")
+	}
+	if got := withReview.ref(EventReviewComment); got != "PRR_1" {
+		t.Fatalf("ref = %q, want the review body PRR_1", got)
+	}
+
+	// A review body only carries inline comments, so they decide.
+	inlineOnly := pr{Number: 7, HeadRefOid: "sha", Author: me, Reviews: []comment{
+		{ID: "PRR_2", Author: them, Submitted: "2026-11-22T12:00:00Z"},
+	}, Inline: []comment{
+		{ID: "PRRC_1", Author: them, Body: "here", CreatedAt: "2026-11-22T12:30:00Z"},
+	}}
+	if !inlineOnly.answerable() {
+		t.Fatal("inline review comment is not answerable")
+	}
+	if got := inlineOnly.ref(EventReviewComment); got != "PRRC_1" {
+		t.Fatalf("ref = %q, want the inline comment PRRC_1", got)
+	}
+
+	// My own inline reply ends the streak again.
+	answered := inlineOnly
+	answered.Inline = append(answered.Inline,
+		comment{ID: "PRRC_2", Author: me, Body: "fixed", CreatedAt: "2026-11-22T13:00:00Z"})
+	if answered.answerable() {
+		t.Fatal("my own inline reply still looks answerable")
+	}
+}
