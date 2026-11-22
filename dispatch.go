@@ -26,6 +26,10 @@ func dispatch(client httpDoer, cfg *Config, rc RepoConfig, p pr, event string) e
 		return err
 	}
 
+	return post(client, cfg, rc, body)
+}
+
+func post(client httpDoer, cfg *Config, rc RepoConfig, body []byte) error {
 	url := fmt.Sprintf("%s/api/workflows/%s/%s/run", cfg.AwfURL, rc.Scope, rc.Workflow)
 	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -38,6 +42,23 @@ func dispatch(client httpDoer, cfg *Config, rc RepoConfig, p pr, event string) e
 		return fmt.Errorf("POST %s: %s: %s", url, resp.Status, bytes.TrimSpace(msg))
 	}
 	return nil
+}
+
+// dispatchIssue fires the workflow for one labeled issue. The issue number is
+// an input, not a pull request number: the workflow decides what to do with it.
+func dispatchIssue(client httpDoer, cfg *Config, rc RepoConfig, iss issue, label string) error {
+	body, err := json.Marshal(map[string]any{
+		"inputs": map[string]any{
+			"repo":  rc.Repo,
+			"issue": strconv.Itoa(iss.Number),
+			"label": label,
+			"event": EventIssueLabeled,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	return post(client, cfg, rc, body)
 }
 
 func newHTTPClient() *http.Client {

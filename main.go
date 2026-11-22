@@ -117,8 +117,61 @@ func (w *watcher) poll() error {
 				return nil
 			}
 		}
+		if !slices.Contains(rc.On, EventIssueLabeled) {
+			continue
+		}
+		issues, err := listIssues(rc.Repo)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "awf-gh: %s: %v\n", rc.Repo, err)
+			continue
+		}
+		for _, iss := range issues {
+			stop, err := w.handleIssue(rc, iss)
+			if err != nil {
+				return err
+			}
+			if stop {
+				fmt.Fprintf(os.Stderr, "awf-gh: max_per_run=%d reached, the rest waits for the next run\n", w.cfg.MaxPerRun)
+				return nil
+			}
+		}
 	}
 	return nil
+}
+
+// handleIssue dispatches one labeled issue and reports whether the per-run cap
+// was hit. One issue can carry several watched labels; each fires once.
+func (w *watcher) handleIssue(rc RepoConfig, iss issue) (bool, error) {
+	if rc.ignores(iss.Author.Login) || !rc.allows(iss.Author.Login) {
+		return false, nil
+	}
+	for _, lb := range iss.labels(rc.Labels) {
+		key := issueKey(rc.Repo, iss.Number, lb)
+		if w.state.has(key) {
+			continue
+		}
+		if w.dryRun {
+			fmt.Printf("would dispatch %s %s#%d @%s\n", EventIssueLabeled, rc.Repo, iss.Number, lb)
+			w.state.remember(key)
+			continue
+		}
+		if !w.seed {
+			if w.dispatched >= w.cfg.MaxPerRun {
+				return true, nil
+			}
+			if err := dispatchIssue(w.client, w.cfg, rc, iss, lb); err != nil {
+				// Not recorded, so the next run retries it.
+				fmt.Fprintf(os.Stderr, "awf-gh: %s#%d %s: %v\n", rc.Repo, iss.Number, EventIssueLabeled, err)
+				continue
+			}
+			fmt.Printf("dispatched %s %s#%d @%s -> %s/%s\n", EventIssueLabeled, rc.Repo, iss.Number, lb, rc.Scope, rc.Workflow)
+			w.dispatched++
+		}
+		if err := w.record(key); err != nil {
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 // handle processes one PR and reports whether the per-run cap was hit.

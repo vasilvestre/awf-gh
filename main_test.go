@@ -249,3 +249,53 @@ func TestBotCommentsAreNotAnswerable(t *testing.T) {
 		t.Fatalf("ref = %q, want the reviewer comment c1", got)
 	}
 }
+
+func TestIssueLabelFiresOncePerLabel(t *testing.T) {
+	w, doer := newTestWatcher(t)
+	rc := RepoConfig{Repo: "o/r", Workflow: "fix-issue", On: []string{EventIssueLabeled}, Labels: []string{"dot"}}
+	iss := issue{Number: 2, Title: "README lie", Author: author{Login: "me"},
+		Labels: []label{{Name: "bug"}, {Name: "dot"}}}
+
+	stop, err := w.handleIssue(rc, iss)
+	if err != nil || stop {
+		t.Fatalf("issue: stop=%v err=%v", stop, err)
+	}
+	if len(doer.calls) != 1 || !strings.Contains(doer.calls[0], `"issue":"2"`) {
+		t.Fatalf("labeled issue dispatched %v, want one with issue 2", doer.calls)
+	}
+
+	// Same label, next pass: nothing.
+	if _, err := w.handleIssue(rc, iss); err != nil {
+		t.Fatal(err)
+	}
+	if len(doer.calls) != 1 {
+		t.Fatalf("same label dispatched twice: %v", doer.calls[1:])
+	}
+
+	// No watched label: nothing, and the author filters still apply.
+	other := issue{Number: 3, Author: author{Login: "me"}, Labels: []label{{Name: "bug"}}}
+	if _, err := w.handleIssue(rc, other); err != nil {
+		t.Fatal(err)
+	}
+	if len(doer.calls) != 1 {
+		t.Fatalf("issue without the label dispatched: %v", doer.calls[1:])
+	}
+
+	rc.IgnoreAuthors = []string{"bot"}
+	bot := issue{Number: 4, Author: author{Login: "bot"}, Labels: []label{{Name: "dot"}}}
+	if _, err := w.handleIssue(rc, bot); err != nil {
+		t.Fatal(err)
+	}
+	if len(doer.calls) != 1 {
+		t.Fatalf("ignored author dispatched: %v", doer.calls[1:])
+	}
+}
+
+func TestIssueLabelNeedsALabel(t *testing.T) {
+	cfg := &Config{Repos: []RepoConfig{{
+		Repo: "o/r", Workflow: "fix-issue", On: []string{EventIssueLabeled},
+	}}}
+	if err := cfg.validate(); err == nil {
+		t.Fatal("issue-labeled without labels passed validation")
+	}
+}

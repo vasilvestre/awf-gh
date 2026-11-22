@@ -26,6 +26,8 @@ type RepoConfig struct {
 	On            []string `yaml:"on"`
 	IgnoreAuthors []string `yaml:"ignore_authors"`
 	OnlyAuthors   []string `yaml:"only_authors"`
+	// Labels turn issue-labeled on for the issues that carry one of them.
+	Labels []string `yaml:"labels"`
 }
 
 func defaultConfigPath() string {
@@ -88,6 +90,10 @@ func (c *Config) validate() error {
 			if !slices.Contains(allEvents, ev) {
 				return fmt.Errorf("repos[%d]: unknown event %q (want one of %v)", i, ev, allEvents)
 			}
+		}
+		if slices.Contains(rc.On, EventIssueLabeled) && len(rc.Labels) == 0 {
+			// Without a label the event would fire on every open issue.
+			return fmt.Errorf("repos[%d]: issue-labeled needs at least one label", i)
 		}
 	}
 	return nil
