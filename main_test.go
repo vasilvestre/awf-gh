@@ -424,6 +424,32 @@ func TestCorruptExecFileRebuilds(t *testing.T) {
 	}
 }
 
+func TestUnreadableExecFileIsLeftAlone(t *testing.T) {
+	w, doer := newTestWatcher(t)
+	rc := RepoConfig{Repo: "o/r", Workflow: "review-pr", On: []string{EventUpdated}}
+
+	// A directory where the file belongs makes the read fail with EISDIR, not
+	// the corruption the code may rebuild over.
+	if err := os.Mkdir(w.state.execPath(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.handle(rc, pr{Number: 20, HeadRefOid: "a"}); err != nil { // first sight
+		t.Fatal(err)
+	}
+	if _, err := w.handle(rc, pr{Number: 20, HeadRefOid: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(w.state.execPath()); err != nil || !fi.IsDir() {
+		t.Fatalf("the unreadable sidecar was overwritten: %v, %v", fi, err)
+	}
+	if _, err := w.handle(rc, pr{Number: 20, HeadRefOid: "c"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(doer.deleted) != 0 {
+		t.Fatalf("deleted %v, want nothing without a readable map", doer.deleted)
+	}
+}
+
 func TestNullExecFileDoesNotPanic(t *testing.T) {
 	w, doer := newTestWatcher(t)
 	rc := RepoConfig{Repo: "o/r", Workflow: "review-pr", On: []string{EventUpdated}}
@@ -474,8 +500,8 @@ func TestAnotherWorkflowKeepsItsRun(t *testing.T) {
 func TestIssueDispatchNeverCancels(t *testing.T) {
 	w, doer := newTestWatcher(t)
 	// A stored execution for the same repository must stay untouched.
-	if err := w.state.saveExec(map[string][]execEntry{
-		execKey("o/r", 2, "fix-issue", "review"): {{SHA: "a", ID: "exec-old"}},
+	if err := w.state.saveExec(map[string][]string{
+		execKey("o/r", 2, "fix-issue", "review"): {"exec-old"},
 	}); err != nil {
 		t.Fatal(err)
 	}

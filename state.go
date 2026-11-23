@@ -76,24 +76,21 @@ func (s *state) add(key string) error {
 	return nil
 }
 
-// execEntry is one execution a pull request event started: the head it
-// reviews, the event that fired it, and the id awf accepted.
-type execEntry struct {
-	SHA   string `json:"sha"`
-	Event string `json:"event"`
-	ID    string `json:"id"`
-}
+// errCorruptExec marks a sidecar that cannot be parsed. Its entries are lost
+// anyway, so the caller may rebuild it; any other read error leaves a file that
+// may still hold every other pull request's ids, which must not be overwritten.
+var errCorruptExec = errors.New("corrupt exec map")
 
 // execPath is the mutable sidecar of the append-only log. The seen set cannot
-// hold these: an entry is replaced on every dispatch. Each slot lists the runs
-// waiting to be cancelled, so a failed cancel is retried and a fresh id is
-// always stored.
+// hold these: an entry is replaced on every dispatch. Each slot lists the
+// execution ids still waiting to be cancelled, so a failed cancel is retried and
+// a fresh id is always stored. The key carries the workflow and the run kind.
 func (s *state) execPath() string { return s.path + ".exec" }
 
 // loadExec returns the stored executions. A missing file is an empty map: the
 // first dispatch creates it.
-func (s *state) loadExec() (map[string][]execEntry, error) {
-	execs := map[string][]execEntry{}
+func (s *state) loadExec() (map[string][]string, error) {
+	execs := map[string][]string{}
 	body, err := os.ReadFile(s.execPath())
 	if errors.Is(err, os.ErrNotExist) {
 		return execs, nil
@@ -105,17 +102,17 @@ func (s *state) loadExec() (map[string][]execEntry, error) {
 		return execs, nil
 	}
 	if err := json.Unmarshal(body, &execs); err != nil {
-		return nil, fmt.Errorf("%s: %w", s.execPath(), err)
+		return nil, fmt.Errorf("%s: %w: %v", s.execPath(), errCorruptExec, err)
 	}
 	// A file holding "null" unmarshals to a nil map with no error; writing to
 	// it would panic on every pass.
 	if execs == nil {
-		execs = map[string][]execEntry{}
+		execs = map[string][]string{}
 	}
 	return execs, nil
 }
 
-func (s *state) saveExec(execs map[string][]execEntry) error {
+func (s *state) saveExec(execs map[string][]string) error {
 	body, err := json.Marshal(execs)
 	if err != nil {
 		return err

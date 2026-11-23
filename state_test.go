@@ -73,7 +73,7 @@ func TestExecMapRoundTrip(t *testing.T) {
 	if err := st.add("o/r#3#seen"); err != nil {
 		t.Fatal(err)
 	}
-	execs[execKey("o/r", 3, "review-pr", "review")] = []execEntry{{SHA: "sha1", ID: "exec-1"}}
+	execs[execKey("o/r", 3, "review-pr", "review")] = []string{"exec-1"}
 	if err := st.saveExec(execs); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestExecMapRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []execEntry{{SHA: "sha1", ID: "exec-1"}}; !slices.Equal(got["o/r#3#review-pr#review"], want) {
+	if want := []string{"exec-1"}; !slices.Equal(got["o/r#3#review-pr#review"], want) {
 		t.Fatalf("reloaded %v, want o/r#3#review-pr#review = %v", got, want)
 	}
 	if reloaded.has("o/r#3") {

@@ -246,24 +246,28 @@ func (w *watcher) replaceExec(rc RepoConfig, p pr, event, id string) {
 	}
 	execs, err := w.state.loadExec()
 	if err != nil {
-		// A corrupt sidecar must not stop every later dispatch from tracking
-		// its run: start from an empty map, which rewrites the file on save.
+		// An unreadable sidecar may still hold every other pull request's id,
+		// so leave it alone. A corrupt one has nothing left to lose: rebuild it,
+		// or nothing would ever be tracked again.
 		fmt.Fprintf(os.Stderr, "awf-gh: %s#%d exec map: %v\n", rc.Repo, p.Number, err)
-		execs = map[string][]execEntry{}
+		if !errors.Is(err, errCorruptExec) {
+			return
+		}
+		execs = map[string][]string{}
 	}
 	key := execKey(rc.Repo, p.Number, rc.Workflow, execClass(event))
-	kept := make([]execEntry, 0, len(execs[key]))
+	kept := make([]string, 0, len(execs[key]))
 	for _, prev := range execs[key] {
-		if prev.ID == "" {
+		if prev == "" {
 			continue
 		}
-		if err := cancel(w.client, w.cfg, prev.ID); err != nil {
+		if err := cancel(w.client, w.cfg, prev); err != nil {
 			// Keep it so a later dispatch retries the cancel.
-			fmt.Fprintf(os.Stderr, "awf-gh: %s#%d cancel %s: %v\n", rc.Repo, p.Number, prev.ID, err)
+			fmt.Fprintf(os.Stderr, "awf-gh: %s#%d cancel %s: %v\n", rc.Repo, p.Number, prev, err)
 			kept = append(kept, prev)
 		}
 	}
-	execs[key] = append(kept, execEntry{SHA: p.HeadRefOid, Event: event, ID: id})
+	execs[key] = append(kept, id)
 	if err := w.state.saveExec(execs); err != nil {
 		fmt.Fprintf(os.Stderr, "awf-gh: %s#%d exec map: %v\n", rc.Repo, p.Number, err)
 	}
