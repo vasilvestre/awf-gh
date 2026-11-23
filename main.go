@@ -245,13 +245,18 @@ func (w *watcher) replaceExec(rc RepoConfig, p pr, event, id string) {
 	}
 	execs, err := w.state.loadExec()
 	if err != nil {
+		// A corrupt sidecar must not stop every later dispatch from tracking
+		// its run: start from an empty map, which rewrites the file on save.
 		fmt.Fprintf(os.Stderr, "awf-gh: %s#%d exec map: %v\n", rc.Repo, p.Number, err)
-		return
+		execs = map[string]execEntry{}
 	}
 	key := execKey(rc.Repo, p.Number, rc.Workflow)
-	if prev, ok := execs[key]; ok && supersedes(prev, p, event) {
+	if prev, ok := execs[key]; ok && supersedes(prev, event) {
 		if err := cancel(w.client, w.cfg, prev.ID); err != nil {
+			// Keep the previous entry so a later dispatch retries the cancel;
+			// overwriting it forgets a run that is still live.
 			fmt.Fprintf(os.Stderr, "awf-gh: %s#%d cancel %s: %v\n", rc.Repo, p.Number, prev.ID, err)
+			return
 		}
 	}
 	execs[key] = execEntry{SHA: p.HeadRefOid, Event: event, ID: id}
@@ -260,16 +265,13 @@ func (w *watcher) replaceExec(rc RepoConfig, p pr, event, id string) {
 	}
 }
 
-// supersedes reports whether the accepted run replaces prev. A moved head
-// always replaces it: prev reviews a commit that is gone. On an unchanged head
-// only a run of the same kind replaces it, so a commit review and a reply to a
-// comment stay alive side by side and both post.
-func supersedes(prev execEntry, p pr, event string) bool {
+// supersedes reports whether the accepted run replaces prev. Two commit
+// reviews, or two replies to different comments, replace each other. A commit
+// review and a reply stay alive side by side and both post, even when a push
+// moved the head: the reply still answers its comment.
+func supersedes(prev execEntry, event string) bool {
 	if prev.ID == "" {
 		return false
-	}
-	if prev.SHA != p.HeadRefOid {
-		return true
 	}
 	return (prev.Event == EventReviewComment) == (event == EventReviewComment)
 }

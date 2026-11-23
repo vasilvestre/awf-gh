@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -219,6 +220,30 @@ func TestCancelFailuresKeepThePassGoing(t *testing.T) {
 	}
 }
 
+func TestFailedCancelKeepsThePreviousEntry(t *testing.T) {
+	w, doer := newTestWatcher(t)
+	doer.status = http.StatusInternalServerError
+	rc := RepoConfig{Repo: "o/r", Workflow: "review-pr", On: []string{EventUpdated}}
+
+	if _, err := w.handle(rc, pr{Number: 17, HeadRefOid: "a"}); err != nil { // first sight
+		t.Fatal(err)
+	}
+	if _, err := w.handle(rc, pr{Number: 17, HeadRefOid: "b"}); err != nil { // exec-1
+		t.Fatal(err)
+	}
+	if _, err := w.handle(rc, pr{Number: 17, HeadRefOid: "c"}); err != nil { // the cancel fails
+		t.Fatal(err)
+	}
+	doer.status = 0
+	if _, err := w.handle(rc, pr{Number: 17, HeadRefOid: "d"}); err != nil { // retries the same run
+		t.Fatal(err)
+	}
+	want := []string{"/api/executions/exec-1", "/api/executions/exec-1"}
+	if !slices.Equal(doer.deleted, want) {
+		t.Fatalf("deleted %v, want the same run retried %v", doer.deleted, want)
+	}
+}
+
 func TestFailedDispatchKeepsThePreviousRun(t *testing.T) {
 	w, doer := newTestWatcher(t)
 	rc := RepoConfig{Repo: "o/r", Workflow: "review-pr", On: []string{EventUpdated}}
@@ -306,6 +331,33 @@ func TestReviewCommentKeepsTheCommitReview(t *testing.T) {
 	}
 }
 
+func TestReviewCommentSurvivesAMovedHead(t *testing.T) {
+	w, doer := newTestWatcher(t)
+	rc := RepoConfig{Repo: "o/r", Workflow: "reply-pr", On: []string{EventUpdated, EventReviewComment}}
+	me := author{Login: "me"}
+	them := author{Login: "reviewer"}
+
+	p := pr{Number: 16, HeadRefOid: "a", Author: me,
+		Comments: []comment{{ID: "c0", Author: me}}}
+	if _, err := w.handle(rc, p); err != nil { // first sight: recorded, not dispatched
+		t.Fatal(err)
+	}
+	p.Comments = append(p.Comments, comment{ID: "c1", Author: them})
+	if _, err := w.handle(rc, p); err != nil { // review-comment, head a
+		t.Fatal(err)
+	}
+	p.HeadRefOid = "b"
+	if _, err := w.handle(rc, p); err != nil { // the author pushes while the reply runs
+		t.Fatal(err)
+	}
+	if len(doer.deleted) != 0 {
+		t.Fatalf("a push cancelled the reply to an unanswered comment: %v", doer.deleted)
+	}
+	if len(doer.calls) != 2 {
+		t.Fatalf("dispatched %d, want review-comment then pr-updated", len(doer.calls))
+	}
+}
+
 func TestAcceptedRunWithoutIDKeepsThePreviousOne(t *testing.T) {
 	w, doer := newTestWatcher(t)
 	rc := RepoConfig{Repo: "o/r", Workflow: "review-pr", On: []string{EventUpdated}}
@@ -332,6 +384,30 @@ func TestAcceptedRunWithoutIDKeepsThePreviousOne(t *testing.T) {
 	}
 	if want := []string{"/api/executions/exec-1"}; !slices.Equal(doer.deleted, want) {
 		t.Fatalf("deleted %v, want the run stored before the id-less one %v", doer.deleted, want)
+	}
+}
+
+func TestCorruptExecFileRebuilds(t *testing.T) {
+	w, doer := newTestWatcher(t)
+	rc := RepoConfig{Repo: "o/r", Workflow: "review-pr", On: []string{EventUpdated}}
+
+	if _, err := w.handle(rc, pr{Number: 18, HeadRefOid: "a"}); err != nil { // first sight
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(w.state.execPath(), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.handle(rc, pr{Number: 18, HeadRefOid: "b"}); err != nil { // tracks exec-1 anyway
+		t.Fatal(err)
+	}
+	if _, err := w.handle(rc, pr{Number: 18, HeadRefOid: "c"}); err != nil { // cancels it
+		t.Fatal(err)
+	}
+	if want := []string{"/api/executions/exec-1"}; !slices.Equal(doer.deleted, want) {
+		t.Fatalf("deleted %v, want the run stored after the rebuild %v", doer.deleted, want)
+	}
+	if _, err := w.state.loadExec(); err != nil {
+		t.Fatalf("the corrupt sidecar was not rewritten: %v", err)
 	}
 }
 
