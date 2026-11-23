@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -73,6 +74,48 @@ func (s *state) add(key string) error {
 	}
 	s.seen[key] = struct{}{}
 	return nil
+}
+
+// execEntry is the last execution a pull request event started: the head it
+// reviews, and the id awf accepted.
+type execEntry struct {
+	SHA string `json:"sha"`
+	ID  string `json:"id"`
+}
+
+// execPath is the mutable sidecar of the append-only log. The seen set cannot
+// hold these: an entry is replaced on every dispatch.
+func (s *state) execPath() string { return s.path + ".exec" }
+
+// loadExec returns the stored executions. A missing file is an empty map: the
+// first dispatch creates it.
+func (s *state) loadExec() (map[string]execEntry, error) {
+	execs := map[string]execEntry{}
+	body, err := os.ReadFile(s.execPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return execs, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(body) == 0 {
+		return execs, nil
+	}
+	if err := json.Unmarshal(body, &execs); err != nil {
+		return nil, fmt.Errorf("%s: %w", s.execPath(), err)
+	}
+	return execs, nil
+}
+
+func (s *state) saveExec(execs map[string]execEntry) error {
+	body, err := json.Marshal(execs)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(s.execPath(), body, 0o644)
 }
 
 // forget drops every key containing match and rewrites the file. The next poll

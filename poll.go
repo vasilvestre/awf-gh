@@ -152,6 +152,11 @@ func seenKey(repo string, number int) string {
 	return fmt.Sprintf("%s#%d#seen", repo, number)
 }
 
+// execKey names the last execution started for a pull request.
+func execKey(repo string, number int) string {
+	return fmt.Sprintf("%s#%d", repo, number)
+}
+
 func listPRs(repo string) ([]pr, error) {
 	cmd := exec.Command("gh", "pr", "list",
 		"--repo", repo,

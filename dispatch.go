@@ -6,14 +6,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 )
 
-// dispatch fires one workflow execution and returns once awf accepts it.
-// The run is async on the awf side: the workflow posts its own review, so the
-// watcher never waits for a result.
-func dispatch(client httpDoer, cfg *Config, rc RepoConfig, p pr, event string) error {
+// dispatch fires one workflow execution and returns the id awf accepted. The id
+// is empty when awf answers without one. The run is async on the awf side: the
+// workflow posts its own review, so the watcher never waits for a result.
+func dispatch(client httpDoer, cfg *Config, rc RepoConfig, p pr, event string) (string, error) {
 	body, err := json.Marshal(map[string]any{
 		"inputs": map[string]any{
 			"repo":  rc.Repo,
@@ -23,25 +24,58 @@ func dispatch(client httpDoer, cfg *Config, rc RepoConfig, p pr, event string) e
 		},
 	})
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	return post(client, cfg, rc, body)
 }
 
-func post(client httpDoer, cfg *Config, rc RepoConfig, body []byte) error {
+func post(client httpDoer, cfg *Config, rc RepoConfig, body []byte) (string, error) {
 	url := fmt.Sprintf("%s/api/workflows/%s/%s/run", cfg.AwfURL, rc.Scope, rc.Workflow)
 	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode/100 != 2 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("POST %s: %s: %s", url, resp.Status, bytes.TrimSpace(msg))
+		return "", fmt.Errorf("POST %s: %s: %s", url, resp.Status, bytes.TrimSpace(msg))
 	}
-	return nil
+
+	// awf answers 202 with {"body":{"execution_id":"..."}}. A 2xx without one
+	// is still an accepted run, so a decode failure is not a dispatch failure.
+	var accepted struct {
+		Body struct {
+			ExecutionID string `json:"execution_id"`
+		} `json:"body"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&accepted); err != nil {
+		return "", nil
+	}
+	return accepted.Body.ExecutionID, nil
+}
+
+// cancel stops a live execution. awf answers 204, and 404 once the run is
+// already gone; both mean it will not post.
+func cancel(client httpDoer, cfg *Config, id string) error {
+	target := fmt.Sprintf("%s/api/executions/%s", cfg.AwfURL, url.PathEscape(id))
+	req, err := http.NewRequest(http.MethodDelete, target, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent, http.StatusNotFound:
+		return nil
+	}
+	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	return fmt.Errorf("DELETE %s: %s: %s", target, resp.Status, bytes.TrimSpace(msg))
 }
 
 // dispatchIssue fires the workflow for one open issue. The issue number is
@@ -59,14 +93,16 @@ func dispatchIssue(client httpDoer, cfg *Config, rc RepoConfig, iss issue, event
 	if err != nil {
 		return err
 	}
-	return post(client, cfg, rc, body)
+	_, err = post(client, cfg, rc, body)
+	return err
 }
 
 func newHTTPClient() *http.Client {
 	return &http.Client{Timeout: 30 * time.Second}
 }
 
-// httpDoer narrows *http.Client so tests can record dispatches.
+// httpDoer narrows *http.Client so tests can record dispatches and cancels.
 type httpDoer interface {
 	Post(url, contentType string, body io.Reader) (*http.Response, error)
+	Do(req *http.Request) (*http.Response, error)
 }

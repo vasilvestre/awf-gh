@@ -214,11 +214,14 @@ func (w *watcher) handle(rc RepoConfig, p pr) (bool, error) {
 			if w.dispatched >= w.cfg.MaxPerRun {
 				return true, nil
 			}
-			if err := dispatch(w.client, w.cfg, rc, p, ev); err != nil {
+			w.supersede(rc, p, ev)
+			id, err := dispatch(w.client, w.cfg, rc, p, ev)
+			if err != nil {
 				// Not recorded, so the next run retries it.
 				fmt.Fprintf(os.Stderr, "awf-gh: %s#%d %s: %v\n", rc.Repo, p.Number, ev, err)
 				continue
 			}
+			w.rememberExec(rc, p, id)
 			fmt.Printf("dispatched %s %s#%d @%s -> %s/%s\n", ev, rc.Repo, p.Number, short(p.ref(ev)), rc.Scope, rc.Workflow)
 			w.dispatched++
 		}
@@ -230,6 +233,41 @@ func (w *watcher) handle(rc RepoConfig, p pr) (bool, error) {
 		return false, err
 	}
 	return false, nil
+}
+
+// supersede stops the run that a newer event for the same pull request
+// replaces: a moved head, or a newer review comment even on the same head.
+// A failed cancel is logged, never fatal: the new run is dispatched anyway.
+func (w *watcher) supersede(rc RepoConfig, p pr, event string) {
+	execs, err := w.state.loadExec()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "awf-gh: %s#%d exec map: %v\n", rc.Repo, p.Number, err)
+		return
+	}
+	prev, ok := execs[execKey(rc.Repo, p.Number)]
+	if !ok || prev.ID == "" || (prev.SHA == p.HeadRefOid && event != EventReviewComment) {
+		return
+	}
+	if err := cancel(w.client, w.cfg, prev.ID); err != nil {
+		fmt.Fprintf(os.Stderr, "awf-gh: %s#%d cancel %s: %v\n", rc.Repo, p.Number, prev.ID, err)
+	}
+}
+
+// rememberExec keeps the accepted execution so the next dispatch for this
+// pull request can cancel it. An empty id means awf answered without one.
+func (w *watcher) rememberExec(rc RepoConfig, p pr, id string) {
+	if id == "" {
+		return
+	}
+	execs, err := w.state.loadExec()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "awf-gh: %s#%d exec map: %v\n", rc.Repo, p.Number, err)
+		return
+	}
+	execs[execKey(rc.Repo, p.Number)] = execEntry{SHA: p.HeadRefOid, ID: id}
+	if err := w.state.saveExec(execs); err != nil {
+		fmt.Fprintf(os.Stderr, "awf-gh: %s#%d exec map: %v\n", rc.Repo, p.Number, err)
+	}
 }
 
 // record persists a key, or only remembers it during a dry run.

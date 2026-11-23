@@ -1,20 +1,43 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"net/http"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
 
 type fakeDoer struct {
-	calls []string
+	calls   []string
+	deleted []string
+	trail   []string
+	nextID  int
+	status  int
 }
 
 func (f *fakeDoer) Post(url, _ string, body io.Reader) (*http.Response, error) {
 	raw, _ := io.ReadAll(body)
 	f.calls = append(f.calls, url+" "+string(raw))
-	return &http.Response{StatusCode: http.StatusAccepted, Body: io.NopCloser(strings.NewReader("{}"))}, nil
+	f.trail = append(f.trail, "POST "+url)
+	f.nextID++
+	reply := fmt.Sprintf(`{"body":{"execution_id":"exec-%d","status":"accepted"}}`, f.nextID)
+	return &http.Response{StatusCode: http.StatusAccepted, Body: io.NopCloser(strings.NewReader(reply))}, nil
+}
+
+func (f *fakeDoer) Do(req *http.Request) (*http.Response, error) {
+	if req.Method != http.MethodDelete {
+		return nil, fmt.Errorf("unexpected %s %s", req.Method, req.URL)
+	}
+	f.deleted = append(f.deleted, req.URL.Path)
+	f.trail = append(f.trail, "DELETE "+req.URL.Path)
+	status := f.status
+	if status == 0 {
+		status = http.StatusNoContent
+	}
+	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(""))}, nil
 }
 
 func newTestWatcher(t *testing.T) (*watcher, *fakeDoer) {
@@ -96,6 +119,113 @@ type errorDoer struct{}
 
 func (errorDoer) Post(string, string, io.Reader) (*http.Response, error) {
 	return nil, io.ErrUnexpectedEOF
+}
+
+func (errorDoer) Do(*http.Request) (*http.Response, error) {
+	return nil, io.ErrUnexpectedEOF
+}
+
+func TestMovedHeadCancelsTheObsoleteRun(t *testing.T) {
+	w, doer := newTestWatcher(t)
+	rc := RepoConfig{Repo: "o/r", Workflow: "review-pr", On: []string{EventUpdated}}
+
+	p := pr{Number: 4, HeadRefOid: "sha1"}
+	if _, err := w.handle(rc, p); err != nil { // first sight: recorded, not dispatched
+		t.Fatal(err)
+	}
+	p.HeadRefOid = "sha2"
+	if _, err := w.handle(rc, p); err != nil {
+		t.Fatal(err)
+	}
+	p.HeadRefOid = "sha3"
+	if _, err := w.handle(rc, p); err != nil {
+		t.Fatal(err)
+	}
+
+	if want := []string{"/api/executions/exec-1"}; !slices.Equal(doer.deleted, want) {
+		t.Fatalf("deleted %v, want the first execution %v", doer.deleted, want)
+	}
+	if len(doer.trail) != 3 || doer.trail[1] != "DELETE /api/executions/exec-1" {
+		t.Fatalf("trail = %v, want the DELETE between the two POSTs", doer.trail)
+	}
+
+	// Another pull request is a different run, not a superseded one.
+	if _, err := w.handle(rc, pr{Number: 5, HeadRefOid: "sha4"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(doer.deleted) != 1 {
+		t.Fatalf("another PR cancelled a run: %v", doer.deleted)
+	}
+}
+
+func TestReviewCommentCancelsOnTheSameHead(t *testing.T) {
+	w, doer := newTestWatcher(t)
+	rc := RepoConfig{Repo: "o/r", Workflow: "reply-pr", On: []string{EventReviewComment}}
+	me := author{Login: "me"}
+	them := author{Login: "reviewer"}
+	p := pr{Number: 6, HeadRefOid: "sha", Author: me,
+		Comments: []comment{{ID: "c0", Author: me}}}
+
+	if _, err := w.handle(rc, p); err != nil { // first sight: recorded, not dispatched
+		t.Fatal(err)
+	}
+	p.Comments = append(p.Comments, comment{ID: "c1", Author: them})
+	if _, err := w.handle(rc, p); err != nil {
+		t.Fatal(err)
+	}
+	p.Comments = append(p.Comments, comment{ID: "c2", Author: them})
+	if _, err := w.handle(rc, p); err != nil {
+		t.Fatal(err)
+	}
+
+	if want := []string{"/api/executions/exec-1"}; !slices.Equal(doer.deleted, want) {
+		t.Fatalf("deleted %v, want the run for the previous comment", doer.deleted)
+	}
+	if len(doer.calls) != 2 {
+		t.Fatalf("dispatched %d, want both comments", len(doer.calls))
+	}
+}
+
+func TestCancelFailuresKeepThePassGoing(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusInternalServerError} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			w, doer := newTestWatcher(t)
+			doer.status = status
+			rc := RepoConfig{Repo: "o/r", Workflow: "review-pr", On: []string{EventUpdated}}
+
+			if _, err := w.handle(rc, pr{Number: 8, HeadRefOid: "a"}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := w.handle(rc, pr{Number: 8, HeadRefOid: "b"}); err != nil {
+				t.Fatal(err)
+			}
+			stop, err := w.handle(rc, pr{Number: 8, HeadRefOid: "c"})
+			if err != nil || stop {
+				t.Fatalf("cancel answered %d: stop=%v err=%v", status, stop, err)
+			}
+			if len(doer.calls) != 2 || len(doer.deleted) != 1 {
+				t.Fatalf("calls=%v deleted=%v, want both POSTs after the cancel",
+					doer.calls, doer.deleted)
+			}
+		})
+	}
+}
+
+func TestIssueDispatchNeverCancels(t *testing.T) {
+	w, doer := newTestWatcher(t)
+	// A stored execution for the same repository must stay untouched.
+	if err := w.state.saveExec(map[string]execEntry{
+		execKey("o/r", 2): {SHA: "a", ID: "exec-old"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rc := RepoConfig{Repo: "o/r", Workflow: "fix-issue", On: []string{EventIssueOpened}}
+	if _, err := w.handleIssue(rc, issue{Number: 2, Author: author{Login: "me"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(doer.deleted) != 0 || len(doer.calls) != 1 {
+		t.Fatalf("deleted=%v calls=%v, want one POST and no DELETE", doer.deleted, doer.calls)
+	}
 }
 
 func TestReviewCommentFiresOncePerComment(t *testing.T) {

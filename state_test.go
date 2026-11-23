@@ -57,6 +57,40 @@ func TestPREvents(t *testing.T) {
 	}
 }
 
+func TestExecMapRoundTrip(t *testing.T) {
+	path := t.TempDir() + "/seen.jsonl"
+	st := newState(path)
+
+	// No file yet: an empty map, not an error.
+	execs, err := st.loadExec()
+	if err != nil || len(execs) != 0 {
+		t.Fatalf("loadExec on a fresh state = %v, %v; want empty", execs, err)
+	}
+
+	if err := st.add("o/r#3#seen"); err != nil {
+		t.Fatal(err)
+	}
+	execs[execKey("o/r", 3)] = execEntry{SHA: "sha1", ID: "exec-1"}
+	if err := st.saveExec(execs); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := loadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := reloaded.loadExec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (execEntry{SHA: "sha1", ID: "exec-1"}); got["o/r#3"] != want {
+		t.Fatalf("reloaded %v, want o/r#3 = %v", got, want)
+	}
+	if reloaded.has("o/r#3") {
+		t.Fatal("the exec map leaked into the append-only seen set")
+	}
+}
+
 func TestStateRoundTrip(t *testing.T) {
 	path := t.TempDir() + "/seen.jsonl"
 	st := newState(path)
