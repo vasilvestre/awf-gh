@@ -152,11 +152,12 @@ func seenKey(repo string, number int) string {
 	return fmt.Sprintf("%s#%d#seen", repo, number)
 }
 
-// execKey names the last execution one workflow started for a pull request.
-// The workflow is part of the key: two configured workflows on one repository
-// run independently, so neither cancels the other's live run.
-func execKey(repo string, number int, workflow string) string {
-	return fmt.Sprintf("%s#%d#%s", repo, number, workflow)
+// execKey names one execution slot: the workflow, the kind of run (commit
+// review or comment reply), and the pull request. The workflow is part of the
+// key so two configured workflows on one repository never cancel each other's
+// live run.
+func execKey(repo string, number int, workflow, class string) string {
+	return fmt.Sprintf("%s#%d#%s#%s", repo, number, workflow, class)
 }
 
 func listPRs(repo string) ([]pr, error) {

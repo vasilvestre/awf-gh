@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"time"
 )
@@ -56,8 +57,9 @@ func post(client httpDoer, cfg *Config, rc RepoConfig, body []byte) (string, err
 	return accepted.Body.ExecutionID, nil
 }
 
-// cancel stops a live execution. awf answers 204, and 404 once the run is
-// already gone; both mean it will not post.
+// cancel stops a live execution. awf answers 204, including for an id it no
+// longer knows, so a cancel is idempotent. A 404 therefore names a route the
+// server does not expose: log it, because every cancel is then a no-op.
 func cancel(client httpDoer, cfg *Config, id string) error {
 	target := fmt.Sprintf("%s/api/executions/%s", cfg.AwfURL, url.PathEscape(id))
 	req, err := http.NewRequest(http.MethodDelete, target, nil)
@@ -71,7 +73,10 @@ func cancel(client httpDoer, cfg *Config, id string) error {
 	defer resp.Body.Close()
 
 	switch resp.StatusCode {
-	case http.StatusNoContent, http.StatusNotFound:
+	case http.StatusNoContent:
+		return nil
+	case http.StatusNotFound:
+		fmt.Fprintf(os.Stderr, "awf-gh: DELETE %s: 404, check that awf serve exposes this route\n", target)
 		return nil
 	}
 	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))

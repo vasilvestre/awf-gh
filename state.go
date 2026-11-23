@@ -76,7 +76,7 @@ func (s *state) add(key string) error {
 	return nil
 }
 
-// execEntry is the last execution a pull request event started: the head it
+// execEntry is one execution a pull request event started: the head it
 // reviews, the event that fired it, and the id awf accepted.
 type execEntry struct {
 	SHA   string `json:"sha"`
@@ -85,13 +85,15 @@ type execEntry struct {
 }
 
 // execPath is the mutable sidecar of the append-only log. The seen set cannot
-// hold these: an entry is replaced on every dispatch.
+// hold these: an entry is replaced on every dispatch. Each slot lists the runs
+// waiting to be cancelled, so a failed cancel is retried and a fresh id is
+// always stored.
 func (s *state) execPath() string { return s.path + ".exec" }
 
 // loadExec returns the stored executions. A missing file is an empty map: the
 // first dispatch creates it.
-func (s *state) loadExec() (map[string]execEntry, error) {
-	execs := map[string]execEntry{}
+func (s *state) loadExec() (map[string][]execEntry, error) {
+	execs := map[string][]execEntry{}
 	body, err := os.ReadFile(s.execPath())
 	if errors.Is(err, os.ErrNotExist) {
 		return execs, nil
@@ -105,10 +107,15 @@ func (s *state) loadExec() (map[string]execEntry, error) {
 	if err := json.Unmarshal(body, &execs); err != nil {
 		return nil, fmt.Errorf("%s: %w", s.execPath(), err)
 	}
+	// A file holding "null" unmarshals to a nil map with no error; writing to
+	// it would panic on every pass.
+	if execs == nil {
+		execs = map[string][]execEntry{}
+	}
 	return execs, nil
 }
 
-func (s *state) saveExec(execs map[string]execEntry) error {
+func (s *state) saveExec(execs map[string][]execEntry) error {
 	body, err := json.Marshal(execs)
 	if err != nil {
 		return err

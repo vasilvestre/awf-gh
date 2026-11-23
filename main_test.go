@@ -238,9 +238,9 @@ func TestFailedCancelKeepsThePreviousEntry(t *testing.T) {
 	if _, err := w.handle(rc, pr{Number: 17, HeadRefOid: "d"}); err != nil { // retries the same run
 		t.Fatal(err)
 	}
-	want := []string{"/api/executions/exec-1", "/api/executions/exec-1"}
+	want := []string{"/api/executions/exec-1", "/api/executions/exec-1", "/api/executions/exec-2"}
 	if !slices.Equal(doer.deleted, want) {
-		t.Fatalf("deleted %v, want the same run retried %v", doer.deleted, want)
+		t.Fatalf("deleted %v, want the failed run retried, then both superseded runs %v", doer.deleted, want)
 	}
 }
 
@@ -329,6 +329,19 @@ func TestReviewCommentKeepsTheCommitReview(t *testing.T) {
 	if len(doer.calls) != 2 {
 		t.Fatalf("dispatched %d, want pr-updated then review-comment", len(doer.calls))
 	}
+
+	// A push while the reply runs cancels the commit review of the old head,
+	// not the reply, which still answers its comment.
+	p.HeadRefOid = "c"
+	if _, err := w.handle(rc, p); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"/api/executions/exec-1"}; !slices.Equal(doer.deleted, want) {
+		t.Fatalf("deleted %v, want the commit review only %v", doer.deleted, want)
+	}
+	if len(doer.calls) != 3 {
+		t.Fatalf("dispatched %d, want a third run for the push", len(doer.calls))
+	}
 }
 
 func TestReviewCommentSurvivesAMovedHead(t *testing.T) {
@@ -411,6 +424,27 @@ func TestCorruptExecFileRebuilds(t *testing.T) {
 	}
 }
 
+func TestNullExecFileDoesNotPanic(t *testing.T) {
+	w, doer := newTestWatcher(t)
+	rc := RepoConfig{Repo: "o/r", Workflow: "review-pr", On: []string{EventUpdated}}
+
+	if err := os.WriteFile(w.state.execPath(), []byte("null"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.handle(rc, pr{Number: 19, HeadRefOid: "a"}); err != nil { // first sight
+		t.Fatal(err)
+	}
+	if _, err := w.handle(rc, pr{Number: 19, HeadRefOid: "b"}); err != nil { // tracks exec-1
+		t.Fatal(err)
+	}
+	if _, err := w.handle(rc, pr{Number: 19, HeadRefOid: "c"}); err != nil { // cancels it
+		t.Fatal(err)
+	}
+	if want := []string{"/api/executions/exec-1"}; !slices.Equal(doer.deleted, want) {
+		t.Fatalf("deleted %v, want the run stored after the null sidecar %v", doer.deleted, want)
+	}
+}
+
 func TestAnotherWorkflowKeepsItsRun(t *testing.T) {
 	w, doer := newTestWatcher(t)
 	me := author{Login: "me"}
@@ -440,8 +474,8 @@ func TestAnotherWorkflowKeepsItsRun(t *testing.T) {
 func TestIssueDispatchNeverCancels(t *testing.T) {
 	w, doer := newTestWatcher(t)
 	// A stored execution for the same repository must stay untouched.
-	if err := w.state.saveExec(map[string]execEntry{
-		execKey("o/r", 2, "fix-issue"): {SHA: "a", ID: "exec-old"},
+	if err := w.state.saveExec(map[string][]execEntry{
+		execKey("o/r", 2, "fix-issue", "review"): {{SHA: "a", ID: "exec-old"}},
 	}); err != nil {
 		t.Fatal(err)
 	}

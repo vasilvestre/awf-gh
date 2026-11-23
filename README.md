@@ -83,6 +83,13 @@ comment id for `review-comment`. So the bot's own comment does not re-fire a
 review, and a new push does. A dispatch that fails is not recorded, so the next
 pass retries it.
 
+A new dispatch cancels the run it replaces with `DELETE
+/api/executions/{id}`, which awf answers with 204, even for an id it no longer
+knows. A commit review and a reply to a comment have separate slots: a push
+cancels the old review and leaves the reply alive, and a new comment cancels
+the previous reply. The ids live in `<state_path>.exec`; a failed cancel is
+retried on the next dispatch.
+
 Timer, every two minutes:
 
 ```ini

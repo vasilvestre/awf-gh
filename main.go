@@ -234,12 +234,13 @@ func (w *watcher) handle(rc RepoConfig, p pr) (bool, error) {
 	return false, nil
 }
 
-// replaceExec cancels the run that the accepted one supersedes, then stores
-// it. The cancel comes after the POST, so a failed dispatch leaves the
-// previous run alive. A failed cancel is logged, never fatal.
+// replaceExec cancels the runs in the accepted one's slot, then stores it. The
+// cancel comes after the POST, so a failed dispatch leaves the previous run
+// alive. A failed cancel is logged and retried on the next dispatch; the
+// accepted id is stored either way, so the newest live run stays cancellable.
 func (w *watcher) replaceExec(rc RepoConfig, p pr, event, id string) {
 	// An id-less run cannot be stored or cancelled later, so it replaces
-	// nothing: keep the previous entry rather than killing it for no record.
+	// nothing: keep what is stored rather than killing it for no record.
 	if id == "" {
 		return
 	}
@@ -248,32 +249,35 @@ func (w *watcher) replaceExec(rc RepoConfig, p pr, event, id string) {
 		// A corrupt sidecar must not stop every later dispatch from tracking
 		// its run: start from an empty map, which rewrites the file on save.
 		fmt.Fprintf(os.Stderr, "awf-gh: %s#%d exec map: %v\n", rc.Repo, p.Number, err)
-		execs = map[string]execEntry{}
+		execs = map[string][]execEntry{}
 	}
-	key := execKey(rc.Repo, p.Number, rc.Workflow)
-	if prev, ok := execs[key]; ok && supersedes(prev, event) {
+	key := execKey(rc.Repo, p.Number, rc.Workflow, execClass(event))
+	kept := make([]execEntry, 0, len(execs[key]))
+	for _, prev := range execs[key] {
+		if prev.ID == "" {
+			continue
+		}
 		if err := cancel(w.client, w.cfg, prev.ID); err != nil {
-			// Keep the previous entry so a later dispatch retries the cancel;
-			// overwriting it forgets a run that is still live.
+			// Keep it so a later dispatch retries the cancel.
 			fmt.Fprintf(os.Stderr, "awf-gh: %s#%d cancel %s: %v\n", rc.Repo, p.Number, prev.ID, err)
-			return
+			kept = append(kept, prev)
 		}
 	}
-	execs[key] = execEntry{SHA: p.HeadRefOid, Event: event, ID: id}
+	execs[key] = append(kept, execEntry{SHA: p.HeadRefOid, Event: event, ID: id})
 	if err := w.state.saveExec(execs); err != nil {
 		fmt.Fprintf(os.Stderr, "awf-gh: %s#%d exec map: %v\n", rc.Repo, p.Number, err)
 	}
 }
 
-// supersedes reports whether the accepted run replaces prev. Two commit
-// reviews, or two replies to different comments, replace each other. A commit
-// review and a reply stay alive side by side and both post, even when a push
-// moved the head: the reply still answers its comment.
-func supersedes(prev execEntry, event string) bool {
-	if prev.ID == "" {
-		return false
+// execClass is the slot an event's run occupies. A commit review and a reply
+// post different comments, so one never replaces the other: a push cancels the
+// review of the old head and leaves the reply to its comment alive, and a new
+// comment cancels the previous reply even on an unchanged head.
+func execClass(event string) string {
+	if event == EventReviewComment {
+		return "reply"
 	}
-	return (prev.Event == EventReviewComment) == (event == EventReviewComment)
+	return "review"
 }
 
 // record persists a key, or only remembers it during a dry run.
