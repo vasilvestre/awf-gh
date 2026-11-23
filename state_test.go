@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"slices"
 	"testing"
 )
@@ -91,6 +92,24 @@ func TestExecMapRoundTrip(t *testing.T) {
 	}
 	if reloaded.has("o/r#3") {
 		t.Fatal("the exec map leaked into the append-only seen set")
+	}
+}
+
+func TestExecWriteDoesNotFollowAPlantedSymlink(t *testing.T) {
+	dir := t.TempDir()
+	st := newState(dir + "/seen.jsonl")
+	victim := dir + "/victim"
+	if err := os.WriteFile(victim, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, st.execPath()+".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.saveExec(map[string][]string{"k": {"exec-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if body, err := os.ReadFile(victim); err != nil || string(body) != "keep" {
+		t.Fatalf("the write followed the symlink: %q, %v", body, err)
 	}
 }
 

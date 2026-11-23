@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -241,6 +242,128 @@ func TestFailedCancelKeepsThePreviousEntry(t *testing.T) {
 	want := []string{"/api/executions/exec-1", "/api/executions/exec-1", "/api/executions/exec-2"}
 	if !slices.Equal(doer.deleted, want) {
 		t.Fatalf("deleted %v, want the failed run retried, then both superseded runs %v", doer.deleted, want)
+	}
+}
+
+// cancelSpy records what the sidecar held each time awf is asked to cancel,
+// which is when a lost id would already be gone.
+type cancelSpy struct {
+	*fakeDoer
+	w    *watcher
+	key  string
+	held []bool
+}
+
+func (c *cancelSpy) Do(req *http.Request) (*http.Response, error) {
+	execs, err := c.w.state.loadExec()
+	c.held = append(c.held, err == nil && slices.Contains(execs[c.key], "exec-2"))
+	return c.fakeDoer.Do(req)
+}
+
+func TestAcceptedRunIsStoredBeforeTheCancel(t *testing.T) {
+	w, doer := newTestWatcher(t)
+	spy := &cancelSpy{fakeDoer: doer, w: w, key: execKey("o/r", 21, "review-pr", "review")}
+	w.client = spy
+	rc := RepoConfig{Repo: "o/r", Workflow: "review-pr", On: []string{EventUpdated}}
+
+	if _, err := w.handle(rc, pr{Number: 21, HeadRefOid: "a"}); err != nil { // first sight
+		t.Fatal(err)
+	}
+	if _, err := w.handle(rc, pr{Number: 21, HeadRefOid: "b"}); err != nil { // exec-1
+		t.Fatal(err)
+	}
+	if _, err := w.handle(rc, pr{Number: 21, HeadRefOid: "c"}); err != nil { // exec-2 supersedes exec-1
+		t.Fatal(err)
+	}
+	if len(spy.held) != 1 || !spy.held[0] {
+		t.Fatalf("the cancel ran with the new run on disk: %v", spy.held)
+	}
+}
+
+func TestUntrackedRunIsCancelledAndRetried(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a read-only directory")
+	}
+	w, doer := newTestWatcher(t)
+	rc := RepoConfig{Repo: "o/r", Workflow: "review-pr", On: []string{EventUpdated}}
+
+	if _, err := w.handle(rc, pr{Number: 30, HeadRefOid: "a"}); err != nil { // first sight
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(w.state.path)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o700)
+
+	if _, err := w.handle(rc, pr{Number: 30, HeadRefOid: "b"}); err == nil {
+		t.Fatal("an unwritable sidecar did not fail the pass")
+	}
+	if want := []string{"/api/executions/exec-1"}; !slices.Equal(doer.deleted, want) {
+		t.Fatalf("deleted %v, want the run nothing can track %v", doer.deleted, want)
+	}
+	if w.state.has(eventKey("o/r", 30, EventUpdated, "b")) {
+		t.Fatal("an untracked run was recorded, the retry is lost")
+	}
+
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.handle(rc, pr{Number: 30, HeadRefOid: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(doer.calls) != 2 {
+		t.Fatalf("dispatched %d, want the retry", len(doer.calls))
+	}
+}
+
+func TestUntrackedRunIsDeferredWhenTheCancelFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a read-only directory")
+	}
+	w, doer := newTestWatcher(t)
+	rc := RepoConfig{Repo: "o/r", Workflow: "review-pr", On: []string{EventUpdated}}
+
+	if _, err := w.handle(rc, pr{Number: 31, HeadRefOid: "a"}); err != nil { // first sight
+		t.Fatal(err)
+	}
+	doer.status = http.StatusInternalServerError
+	dir := filepath.Dir(w.state.path)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o700)
+
+	if _, err := w.handle(rc, pr{Number: 31, HeadRefOid: "b"}); err == nil {
+		t.Fatal("a run nothing can stop did not fail the pass")
+	}
+	body, err := os.ReadFile(w.state.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), cancelPrefix+"exec-1") {
+		t.Fatalf("the run no write could store is gone: %q", body)
+	}
+}
+
+func TestDeferredCancelRunsBeforeThePass(t *testing.T) {
+	w, doer := newTestWatcher(t)
+	if err := w.state.add(cancelPrefix + "exec-7"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.poll(); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"/api/executions/exec-7"}; !slices.Equal(doer.deleted, want) {
+		t.Fatalf("deleted %v, want the deferred run %v", doer.deleted, want)
+	}
+	body, err := os.ReadFile(w.state.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "exec-7") {
+		t.Fatalf("the deferral outlived its cancel: %q", body)
 	}
 }
 

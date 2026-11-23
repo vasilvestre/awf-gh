@@ -14,7 +14,8 @@ import (
 var errNoState = errors.New("state file does not exist")
 
 // state is an append-only set of dedup keys. One line per dispatched event,
-// which doubles as an audit trail.
+// which doubles as an audit trail. A `cancel:` line holds an execution id the
+// exec sidecar could not store, for the next pass to cancel.
 //
 // shortcut: keys are never pruned, the file grows by a line per PR event.
 // Rotate it by hand when it reaches a few thousand lines.
@@ -121,9 +122,20 @@ func (s *state) saveExec(execs map[string][]string) error {
 		return err
 	}
 	// Temp file then rename, like forget: a crash mid-write must not leave
-	// invalid JSON that makes every later load fail.
-	tmp := s.execPath() + ".tmp"
-	if err := os.WriteFile(tmp, body, 0o644); err != nil {
+	// invalid JSON that makes every later load fail. CreateTemp opens a fresh
+	// name with O_EXCL, so a symlink planted at a fixed path cannot point the
+	// write at another file.
+	f, err := os.CreateTemp(filepath.Dir(s.execPath()), filepath.Base(s.execPath())+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp) // gone already once the rename succeeds
+	if _, err := f.Write(body); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, s.execPath())

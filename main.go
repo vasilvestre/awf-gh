@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 )
 
 func main() {
@@ -87,6 +88,9 @@ type watcher struct {
 }
 
 func (w *watcher) poll() error {
+	if !w.dryRun {
+		w.drainCancels()
+	}
 	for _, rc := range w.cfg.Repos {
 		prs, err := listPRs(rc.Repo)
 		if err != nil {
@@ -137,6 +141,36 @@ func (w *watcher) poll() error {
 		}
 	}
 	return nil
+}
+
+// cancelPrefix marks a seen line that holds an execution id rather than an
+// event key: awf accepted the run but the sidecar could not store it and the
+// cancel failed too, so the next pass stops it before it polls.
+const cancelPrefix = "cancel:"
+
+// drainCancels stops the runs an earlier pass accepted but could not store or
+// cancel. A cancel is idempotent, so a failed prune only repeats itself.
+func (w *watcher) drainCancels() {
+	var pending []string
+	for key := range w.state.seen {
+		if id, ok := strings.CutPrefix(key, cancelPrefix); ok {
+			pending = append(pending, id)
+		}
+	}
+	if len(pending) == 0 {
+		return
+	}
+	slices.Sort(pending)
+	for _, id := range pending {
+		if err := cancel(w.client, w.cfg, id); err != nil {
+			// Keep every id: the next pass retries them.
+			fmt.Fprintf(os.Stderr, "awf-gh: cancel %s: %v\n", id, err)
+			return
+		}
+	}
+	if _, err := w.state.forget(cancelPrefix); err != nil {
+		fmt.Fprintf(os.Stderr, "awf-gh: defer cancel: %v\n", err)
+	}
 }
 
 // handleIssue dispatches one issue and reports whether the per-run cap was
@@ -220,7 +254,11 @@ func (w *watcher) handle(rc RepoConfig, p pr) (bool, error) {
 				fmt.Fprintf(os.Stderr, "awf-gh: %s#%d %s: %v\n", rc.Repo, p.Number, ev, err)
 				continue
 			}
-			w.replaceExec(rc, p, ev, id)
+			if err := w.replaceExec(rc, p, ev, id); err != nil {
+				// The run is stopped and the event stays unrecorded, so the
+				// next pass retries it.
+				return false, err
+			}
 			fmt.Printf("dispatched %s %s#%d @%s -> %s/%s\n", ev, rc.Repo, p.Number, short(p.ref(ev)), rc.Scope, rc.Workflow)
 			w.dispatched++
 		}
@@ -234,15 +272,17 @@ func (w *watcher) handle(rc RepoConfig, p pr) (bool, error) {
 	return false, nil
 }
 
-// replaceExec cancels the runs in the accepted one's slot, then stores it. The
-// cancel comes after the POST, so a failed dispatch leaves the previous run
-// alive. A failed cancel is logged and retried on the next dispatch; the
-// accepted id is stored either way, so the newest live run stays cancellable.
-func (w *watcher) replaceExec(rc RepoConfig, p pr, event, id string) {
+// replaceExec stores the accepted run, then cancels the runs it supersedes. The
+// id reaches disk before any cancel, so a failed write leaves the previous run
+// alive instead of stopping it for an id nothing can reach. A run the sidecar
+// cannot hold is cancelled at once, because nothing could ever cancel it later.
+// A failed cancel is logged and retried on the next dispatch; the accepted id
+// stays stored.
+func (w *watcher) replaceExec(rc RepoConfig, p pr, event, id string) error {
 	// An id-less run cannot be stored or cancelled later, so it replaces
 	// nothing: keep what is stored rather than killing it for no record.
 	if id == "" {
-		return
+		return nil
 	}
 	execs, err := w.state.loadExec()
 	if err != nil {
@@ -251,26 +291,42 @@ func (w *watcher) replaceExec(rc RepoConfig, p pr, event, id string) {
 		// or nothing would ever be tracked again.
 		fmt.Fprintf(os.Stderr, "awf-gh: %s#%d exec map: %v\n", rc.Repo, p.Number, err)
 		if !errors.Is(err, errCorruptExec) {
-			return
+			return nil
 		}
 		execs = map[string][]string{}
 	}
 	key := execKey(rc.Repo, p.Number, rc.Workflow, execClass(event))
-	kept := make([]string, 0, len(execs[key]))
-	for _, prev := range execs[key] {
-		if prev == "" {
+	prev := execs[key]
+	execs[key] = append(prev, id)
+	if err := w.state.saveExec(execs); err != nil {
+		// Nothing can cancel a run the sidecar does not hold, so stop it now.
+		if cerr := cancel(w.client, w.cfg, id); cerr != nil {
+			// The id dies with this pass unless it reaches a file, and the
+			// seen log is only appended to, so it still takes when the
+			// sidecar cannot be replaced. The next pass cancels it.
+			fmt.Fprintf(os.Stderr, "awf-gh: %s#%d cancel %s: %v\n", rc.Repo, p.Number, id, cerr)
+			if aerr := w.state.add(cancelPrefix + id); aerr != nil {
+				fmt.Fprintf(os.Stderr, "awf-gh: %s#%d defer cancel %s: %v\n", rc.Repo, p.Number, id, aerr)
+			}
+		}
+		return fmt.Errorf("%s#%d exec map: %w", rc.Repo, p.Number, err)
+	}
+	kept := make([]string, 0, len(prev))
+	for _, old := range prev {
+		if old == "" {
 			continue
 		}
-		if err := cancel(w.client, w.cfg, prev); err != nil {
+		if err := cancel(w.client, w.cfg, old); err != nil {
 			// Keep it so a later dispatch retries the cancel.
-			fmt.Fprintf(os.Stderr, "awf-gh: %s#%d cancel %s: %v\n", rc.Repo, p.Number, prev, err)
-			kept = append(kept, prev)
+			fmt.Fprintf(os.Stderr, "awf-gh: %s#%d cancel %s: %v\n", rc.Repo, p.Number, old, err)
+			kept = append(kept, old)
 		}
 	}
 	execs[key] = append(kept, id)
 	if err := w.state.saveExec(execs); err != nil {
 		fmt.Fprintf(os.Stderr, "awf-gh: %s#%d exec map: %v\n", rc.Repo, p.Number, err)
 	}
+	return nil
 }
 
 // execClass is the slot an event's run occupies. A commit review and a reply
