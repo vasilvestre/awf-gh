@@ -11,17 +11,21 @@ import (
 )
 
 type fakeDoer struct {
-	calls   []string
-	deleted []string
-	trail   []string
-	nextID  int
-	status  int
+	calls    []string
+	deleted  []string
+	trail    []string
+	nextID   int
+	status   int
+	failPost bool
 }
 
 func (f *fakeDoer) Post(url, _ string, body io.Reader) (*http.Response, error) {
 	raw, _ := io.ReadAll(body)
 	f.calls = append(f.calls, url+" "+string(raw))
 	f.trail = append(f.trail, "POST "+url)
+	if f.failPost {
+		return nil, io.ErrUnexpectedEOF
+	}
 	f.nextID++
 	reply := fmt.Sprintf(`{"body":{"execution_id":"exec-%d","status":"accepted"}}`, f.nextID)
 	return &http.Response{StatusCode: http.StatusAccepted, Body: io.NopCloser(strings.NewReader(reply))}, nil
@@ -145,8 +149,8 @@ func TestMovedHeadCancelsTheObsoleteRun(t *testing.T) {
 	if want := []string{"/api/executions/exec-1"}; !slices.Equal(doer.deleted, want) {
 		t.Fatalf("deleted %v, want the first execution %v", doer.deleted, want)
 	}
-	if len(doer.trail) != 3 || doer.trail[1] != "DELETE /api/executions/exec-1" {
-		t.Fatalf("trail = %v, want the DELETE between the two POSTs", doer.trail)
+	if len(doer.trail) != 3 || doer.trail[2] != "DELETE /api/executions/exec-1" {
+		t.Fatalf("trail = %v, want the DELETE after the second POST", doer.trail)
 	}
 
 	// Another pull request is a different run, not a superseded one.
@@ -211,11 +215,78 @@ func TestCancelFailuresKeepThePassGoing(t *testing.T) {
 	}
 }
 
+func TestFailedDispatchKeepsThePreviousRun(t *testing.T) {
+	w, doer := newTestWatcher(t)
+	rc := RepoConfig{Repo: "o/r", Workflow: "review-pr", On: []string{EventUpdated}}
+
+	if _, err := w.handle(rc, pr{Number: 10, HeadRefOid: "a"}); err != nil { // first sight: recorded
+		t.Fatal(err)
+	}
+	if _, err := w.handle(rc, pr{Number: 10, HeadRefOid: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	doer.failPost = true
+	if _, err := w.handle(rc, pr{Number: 10, HeadRefOid: "c"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(doer.deleted) != 0 {
+		t.Fatalf("a failed dispatch cancelled the live run: %v", doer.deleted)
+	}
+}
+
+func TestChecksFailedCancelsTheSameHeadRun(t *testing.T) {
+	w, doer := newTestWatcher(t)
+	rc := RepoConfig{Repo: "o/r", Workflow: "review-pr", On: []string{EventUpdated, EventChecksFailed}}
+
+	if _, err := w.handle(rc, pr{Number: 11, HeadRefOid: "a"}); err != nil { // first sight: recorded
+		t.Fatal(err)
+	}
+	if _, err := w.handle(rc, pr{Number: 11, HeadRefOid: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	red := pr{Number: 11, HeadRefOid: "b", StatusCheckRollup: []check{{Conclusion: "FAILURE"}}}
+	if _, err := w.handle(rc, red); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"/api/executions/exec-1"}; !slices.Equal(doer.deleted, want) {
+		t.Fatalf("deleted %v, want the pr-updated run %v", doer.deleted, want)
+	}
+	if len(doer.calls) != 2 {
+		t.Fatalf("dispatched %d, want pr-updated then checks-failed", len(doer.calls))
+	}
+}
+
+func TestAnotherWorkflowKeepsItsRun(t *testing.T) {
+	w, doer := newTestWatcher(t)
+	me := author{Login: "me"}
+	review := RepoConfig{Repo: "o/r", Workflow: "review-pr", On: []string{EventUpdated}}
+	reply := RepoConfig{Repo: "o/r", Workflow: "reply-pr", On: []string{EventReviewComment}}
+
+	p := pr{Number: 12, HeadRefOid: "a", Author: me}
+	if _, err := w.handle(review, p); err != nil { // first sight: recorded
+		t.Fatal(err)
+	}
+	p.HeadRefOid = "b"
+	if _, err := w.handle(review, p); err != nil {
+		t.Fatal(err)
+	}
+	p.Comments = []comment{{ID: "c1", Author: author{Login: "reviewer"}}}
+	if _, err := w.handle(reply, p); err != nil { // reply-pr, same PR and head
+		t.Fatal(err)
+	}
+	if len(doer.deleted) != 0 {
+		t.Fatalf("reply-pr cancelled review-pr: %v", doer.deleted)
+	}
+	if len(doer.calls) != 2 {
+		t.Fatalf("dispatched %d, want one run per workflow", len(doer.calls))
+	}
+}
+
 func TestIssueDispatchNeverCancels(t *testing.T) {
 	w, doer := newTestWatcher(t)
 	// A stored execution for the same repository must stay untouched.
 	if err := w.state.saveExec(map[string]execEntry{
-		execKey("o/r", 2): {SHA: "a", ID: "exec-old"},
+		execKey("o/r", 2, "fix-issue"): {SHA: "a", ID: "exec-old"},
 	}); err != nil {
 		t.Fatal(err)
 	}

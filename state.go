@@ -77,10 +77,11 @@ func (s *state) add(key string) error {
 }
 
 // execEntry is the last execution a pull request event started: the head it
-// reviews, and the id awf accepted.
+// reviews, the event that fired it, and the id awf accepted.
 type execEntry struct {
-	SHA string `json:"sha"`
-	ID  string `json:"id"`
+	SHA   string `json:"sha"`
+	Event string `json:"event"`
+	ID    string `json:"id"`
 }
 
 // execPath is the mutable sidecar of the append-only log. The seen set cannot
@@ -115,7 +116,13 @@ func (s *state) saveExec(execs map[string]execEntry) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(s.execPath(), body, 0o644)
+	// Temp file then rename, like forget: a crash mid-write must not leave
+	// invalid JSON that makes every later load fail.
+	tmp := s.execPath() + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.execPath())
 }
 
 // forget drops every key containing match and rewrites the file. The next poll

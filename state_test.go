@@ -70,7 +70,7 @@ func TestExecMapRoundTrip(t *testing.T) {
 	if err := st.add("o/r#3#seen"); err != nil {
 		t.Fatal(err)
 	}
-	execs[execKey("o/r", 3)] = execEntry{SHA: "sha1", ID: "exec-1"}
+	execs[execKey("o/r", 3, "review-pr")] = execEntry{SHA: "sha1", ID: "exec-1"}
 	if err := st.saveExec(execs); err != nil {
 		t.Fatal(err)
 	}
@@ -83,8 +83,8 @@ func TestExecMapRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (execEntry{SHA: "sha1", ID: "exec-1"}); got["o/r#3"] != want {
-		t.Fatalf("reloaded %v, want o/r#3 = %v", got, want)
+	if want := (execEntry{SHA: "sha1", ID: "exec-1"}); got["o/r#3#review-pr"] != want {
+		t.Fatalf("reloaded %v, want o/r#3#review-pr = %v", got, want)
 	}
 	if reloaded.has("o/r#3") {
 		t.Fatal("the exec map leaked into the append-only seen set")
