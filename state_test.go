@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"slices"
+	"testing"
+)
 
 func TestEventKey(t *testing.T) {
 	tests := []struct {
@@ -54,6 +58,58 @@ func TestPREvents(t *testing.T) {
 	}
 	if got := green.events([]string{EventOpened}); len(got) != 1 {
 		t.Errorf("only pr-opened configured, got %v", got)
+	}
+}
+
+func TestExecMapRoundTrip(t *testing.T) {
+	path := t.TempDir() + "/seen.jsonl"
+	st := newState(path)
+
+	// No file yet: an empty map, not an error.
+	execs, err := st.loadExec()
+	if err != nil || len(execs) != 0 {
+		t.Fatalf("loadExec on a fresh state = %v, %v; want empty", execs, err)
+	}
+
+	if err := st.add("o/r#3#seen"); err != nil {
+		t.Fatal(err)
+	}
+	execs[execKey("o/r", 3, "review-pr", "review")] = []string{"exec-1"}
+	if err := st.saveExec(execs); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := loadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := reloaded.loadExec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"exec-1"}; !slices.Equal(got["o/r#3#review-pr#review"], want) {
+		t.Fatalf("reloaded %v, want o/r#3#review-pr#review = %v", got, want)
+	}
+	if reloaded.has("o/r#3") {
+		t.Fatal("the exec map leaked into the append-only seen set")
+	}
+}
+
+func TestExecWriteDoesNotFollowAPlantedSymlink(t *testing.T) {
+	dir := t.TempDir()
+	st := newState(dir + "/seen.jsonl")
+	victim := dir + "/victim"
+	if err := os.WriteFile(victim, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, st.execPath()+".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.saveExec(map[string][]string{"k": {"exec-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if body, err := os.ReadFile(victim); err != nil || string(body) != "keep" {
+		t.Fatalf("the write followed the symlink: %q, %v", body, err)
 	}
 }
 

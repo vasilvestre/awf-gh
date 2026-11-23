@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,7 +14,8 @@ import (
 var errNoState = errors.New("state file does not exist")
 
 // state is an append-only set of dedup keys. One line per dispatched event,
-// which doubles as an audit trail.
+// which doubles as an audit trail. A `cancel:` line holds an execution id the
+// exec sidecar could not store, for the next pass to cancel.
 //
 // shortcut: keys are never pruned, the file grows by a line per PR event.
 // Rotate it by hand when it reaches a few thousand lines.
@@ -73,6 +75,70 @@ func (s *state) add(key string) error {
 	}
 	s.seen[key] = struct{}{}
 	return nil
+}
+
+// errCorruptExec marks a sidecar that cannot be parsed. Its entries are lost
+// anyway, so the caller may rebuild it; any other read error leaves a file that
+// may still hold every other pull request's ids, which must not be overwritten.
+var errCorruptExec = errors.New("corrupt exec map")
+
+// execPath is the mutable sidecar of the append-only log. The seen set cannot
+// hold these: an entry is replaced on every dispatch. Each slot lists the
+// execution ids still waiting to be cancelled, so a failed cancel is retried and
+// a fresh id is always stored. The key carries the workflow and the run kind.
+func (s *state) execPath() string { return s.path + ".exec" }
+
+// loadExec returns the stored executions. A missing file is an empty map: the
+// first dispatch creates it.
+func (s *state) loadExec() (map[string][]string, error) {
+	execs := map[string][]string{}
+	body, err := os.ReadFile(s.execPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return execs, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(body) == 0 {
+		return execs, nil
+	}
+	if err := json.Unmarshal(body, &execs); err != nil {
+		return nil, fmt.Errorf("%s: %w: %v", s.execPath(), errCorruptExec, err)
+	}
+	// A file holding "null" unmarshals to a nil map with no error; writing to
+	// it would panic on every pass.
+	if execs == nil {
+		execs = map[string][]string{}
+	}
+	return execs, nil
+}
+
+func (s *state) saveExec(execs map[string][]string) error {
+	body, err := json.Marshal(execs)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+		return err
+	}
+	// Temp file then rename, like forget: a crash mid-write must not leave
+	// invalid JSON that makes every later load fail. CreateTemp opens a fresh
+	// name with O_EXCL, so a symlink planted at a fixed path cannot point the
+	// write at another file.
+	f, err := os.CreateTemp(filepath.Dir(s.execPath()), filepath.Base(s.execPath())+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp) // gone already once the rename succeeds
+	if _, err := f.Write(body); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.execPath())
 }
 
 // forget drops every key containing match and rewrites the file. The next poll
