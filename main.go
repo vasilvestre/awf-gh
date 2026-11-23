@@ -238,6 +238,11 @@ func (w *watcher) handle(rc RepoConfig, p pr) (bool, error) {
 // it. The cancel comes after the POST, so a failed dispatch leaves the
 // previous run alive. A failed cancel is logged, never fatal.
 func (w *watcher) replaceExec(rc RepoConfig, p pr, event, id string) {
+	// An id-less run cannot be stored or cancelled later, so it replaces
+	// nothing: keep the previous entry rather than killing it for no record.
+	if id == "" {
+		return
+	}
 	execs, err := w.state.loadExec()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "awf-gh: %s#%d exec map: %v\n", rc.Repo, p.Number, err)
@@ -249,28 +254,24 @@ func (w *watcher) replaceExec(rc RepoConfig, p pr, event, id string) {
 			fmt.Fprintf(os.Stderr, "awf-gh: %s#%d cancel %s: %v\n", rc.Repo, p.Number, prev.ID, err)
 		}
 	}
-	if id == "" {
-		return
-	}
 	execs[key] = execEntry{SHA: p.HeadRefOid, Event: event, ID: id}
 	if err := w.state.saveExec(execs); err != nil {
 		fmt.Fprintf(os.Stderr, "awf-gh: %s#%d exec map: %v\n", rc.Repo, p.Number, err)
 	}
 }
 
-// supersedes reports whether the accepted run replaces prev: any moved head,
-// a newer review comment on the same head, or the checks-failed run replacing
-// the pr-updated one that poll.go drops for that commit.
+// supersedes reports whether the accepted run replaces prev. A moved head
+// always replaces it: prev reviews a commit that is gone. On an unchanged head
+// only a run of the same kind replaces it, so a commit review and a reply to a
+// comment stay alive side by side and both post.
 func supersedes(prev execEntry, p pr, event string) bool {
-	switch {
-	case prev.ID == "":
+	if prev.ID == "" {
 		return false
-	case prev.SHA != p.HeadRefOid:
-		return true
-	case event == EventReviewComment:
+	}
+	if prev.SHA != p.HeadRefOid {
 		return true
 	}
-	return event == EventChecksFailed && prev.Event == EventUpdated
+	return (prev.Event == EventReviewComment) == (event == EventReviewComment)
 }
 
 // record persists a key, or only remembers it during a dry run.

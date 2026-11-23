@@ -17,6 +17,7 @@ type fakeDoer struct {
 	nextID   int
 	status   int
 	failPost bool
+	emptyID  bool
 }
 
 func (f *fakeDoer) Post(url, _ string, body io.Reader) (*http.Response, error) {
@@ -25,6 +26,9 @@ func (f *fakeDoer) Post(url, _ string, body io.Reader) (*http.Response, error) {
 	f.trail = append(f.trail, "POST "+url)
 	if f.failPost {
 		return nil, io.ErrUnexpectedEOF
+	}
+	if f.emptyID {
+		return &http.Response{StatusCode: http.StatusAccepted, Body: io.NopCloser(strings.NewReader("{}"))}, nil
 	}
 	f.nextID++
 	reply := fmt.Sprintf(`{"body":{"execution_id":"exec-%d","status":"accepted"}}`, f.nextID)
@@ -253,6 +257,81 @@ func TestChecksFailedCancelsTheSameHeadRun(t *testing.T) {
 	}
 	if len(doer.calls) != 2 {
 		t.Fatalf("dispatched %d, want pr-updated then checks-failed", len(doer.calls))
+	}
+}
+
+func TestChecksFailedCancelsTheOpenedRun(t *testing.T) {
+	w, doer := newTestWatcher(t)
+	rc := RepoConfig{Repo: "o/r", Workflow: "review-pr", On: []string{EventOpened, EventUpdated, EventChecksFailed}}
+
+	green := pr{Number: 13, HeadRefOid: "a"}
+	if _, err := w.handle(rc, green); err != nil { // first sight: pr-opened only
+		t.Fatal(err)
+	}
+	red := green
+	red.StatusCheckRollup = []check{{Conclusion: "FAILURE"}}
+	if _, err := w.handle(rc, red); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"/api/executions/exec-1"}; !slices.Equal(doer.deleted, want) {
+		t.Fatalf("deleted %v, want the pr-opened run %v", doer.deleted, want)
+	}
+	if len(doer.calls) != 2 {
+		t.Fatalf("dispatched %d, want pr-opened then checks-failed", len(doer.calls))
+	}
+}
+
+func TestReviewCommentKeepsTheCommitReview(t *testing.T) {
+	w, doer := newTestWatcher(t)
+	rc := RepoConfig{Repo: "o/r", Workflow: "review-pr", On: []string{EventUpdated, EventReviewComment}}
+	me := author{Login: "me"}
+
+	p := pr{Number: 14, HeadRefOid: "a", Author: me}
+	if _, err := w.handle(rc, p); err != nil { // first sight: recorded, not dispatched
+		t.Fatal(err)
+	}
+	p.HeadRefOid = "b"
+	if _, err := w.handle(rc, p); err != nil {
+		t.Fatal(err)
+	}
+	p.Comments = []comment{{ID: "c1", Author: author{Login: "reviewer"}}}
+	if _, err := w.handle(rc, p); err != nil {
+		t.Fatal(err)
+	}
+	if len(doer.deleted) != 0 {
+		t.Fatalf("the comment run cancelled the live review: %v", doer.deleted)
+	}
+	if len(doer.calls) != 2 {
+		t.Fatalf("dispatched %d, want pr-updated then review-comment", len(doer.calls))
+	}
+}
+
+func TestAcceptedRunWithoutIDKeepsThePreviousOne(t *testing.T) {
+	w, doer := newTestWatcher(t)
+	rc := RepoConfig{Repo: "o/r", Workflow: "review-pr", On: []string{EventUpdated}}
+
+	if _, err := w.handle(rc, pr{Number: 15, HeadRefOid: "a"}); err != nil { // first sight: recorded
+		t.Fatal(err)
+	}
+	if _, err := w.handle(rc, pr{Number: 15, HeadRefOid: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	doer.emptyID = true
+	if _, err := w.handle(rc, pr{Number: 15, HeadRefOid: "c"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(doer.deleted) != 0 {
+		t.Fatalf("an id-less run cancelled the live run: %v", doer.deleted)
+	}
+
+	// The stored entry still names the run awf will cancel: the next head
+	// supersedes it and records its own id.
+	doer.emptyID = false
+	if _, err := w.handle(rc, pr{Number: 15, HeadRefOid: "d"}); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"/api/executions/exec-1"}; !slices.Equal(doer.deleted, want) {
+		t.Fatalf("deleted %v, want the run stored before the id-less one %v", doer.deleted, want)
 	}
 }
 
