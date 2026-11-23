@@ -14,10 +14,11 @@ const (
 	EventUpdated       = "pr-updated"
 	EventChecksFailed  = "checks-failed"
 	EventReviewComment = "review-comment"
+	EventIssueOpened   = "issue-opened"
 	EventIssueLabeled  = "issue-labeled"
 )
 
-var allEvents = []string{EventOpened, EventUpdated, EventChecksFailed, EventReviewComment, EventIssueLabeled}
+var allEvents = []string{EventOpened, EventUpdated, EventChecksFailed, EventReviewComment, EventIssueOpened, EventIssueLabeled}
 
 // pr keeps only the fields the dedup key needs. Reading the body or the diff
 // is the workflow's job, not the watcher's.
@@ -193,7 +194,7 @@ func inlineComments(repo string, number int) ([]comment, error) {
 	return cs, nil
 }
 
-// issue keeps what the label trigger needs: the number for the key and the
+// issue keeps what the issue triggers need: the number for the key and the
 // inputs, the labels to match, the author for the same filters as pull
 // requests.
 type issue struct {
@@ -219,10 +220,14 @@ func (i issue) labels(wanted []string) []string {
 	return out
 }
 
-// issueKey is the dedup identity: one dispatch per issue and label. Adding the
-// label again does not fire twice; `--forget repo#issue<N>` replays it.
-func issueKey(repo string, number int, label string) string {
-	return fmt.Sprintf("%s#issue%d#%s@%s", repo, number, EventIssueLabeled, label)
+// issueKey is the dedup identity: one dispatch per issue and event, plus the
+// label for issue-labeled. Adding the label again does not fire twice;
+// `--forget repo#issue<N>` replays it.
+func issueKey(repo string, number int, event, label string) string {
+	if label == "" {
+		return fmt.Sprintf("%s#issue%d#%s", repo, number, event)
+	}
+	return fmt.Sprintf("%s#issue%d#%s@%s", repo, number, event, label)
 }
 
 func listIssues(repo string) ([]issue, error) {
