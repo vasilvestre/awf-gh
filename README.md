@@ -53,6 +53,11 @@ Events:
 - `review-comment`: the newest comment on the PR is not written by the PR
   author. The event fires once per comment id, so your own reply ends the
   streak and the same comment never fires twice.
+- `issue-opened`: an open issue not yet dispatched for this event. It needs no
+  label, so a repository where every issue is yours needs no hand labelling.
+  Run `--seed` once after adding the rule, so the issues that already exist are
+  recorded instead of dispatched. The event fires once per issue; the inputs
+  are `repo`, `issue` and `event`.
 - `issue-labeled`: an open issue carries one of `repos[].labels`. The event
   fires once per issue and label, so adding the label again is silent; use
   `--forget 'owner/repo#issue2'` to replay it. The inputs are `repo`, `issue`,

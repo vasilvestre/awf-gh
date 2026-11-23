@@ -37,3 +37,9 @@ repos:
     on: [issue-labeled]
     labels: ["dot"]
     ignore_authors: ["dependabot[bot]", "renovate[bot]", "github-actions[bot]"]
+
+  # Work every issue as it opens, on a repository where all the issues are
+  # yours. No label is needed; seed once so the existing issues are recorded.
+  - repo: your-org/your-own-repo
+    workflow: fix-issue
+    on: [issue-opened]

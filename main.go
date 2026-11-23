@@ -117,7 +117,7 @@ func (w *watcher) poll() error {
 				return nil
 			}
 		}
-		if !slices.Contains(rc.On, EventIssueLabeled) {
+		if !slices.Contains(rc.On, EventIssueOpened) && !slices.Contains(rc.On, EventIssueLabeled) {
 			continue
 		}
 		issues, err := listIssues(rc.Repo)
@@ -139,19 +139,33 @@ func (w *watcher) poll() error {
 	return nil
 }
 
-// handleIssue dispatches one labeled issue and reports whether the per-run cap
-// was hit. One issue can carry several watched labels; each fires once.
+// handleIssue dispatches one issue and reports whether the per-run cap was
+// hit. issue-labeled fires once per watched label, issue-opened once.
 func (w *watcher) handleIssue(rc RepoConfig, iss issue) (bool, error) {
 	if rc.ignores(iss.Author.Login) || !rc.allows(iss.Author.Login) {
 		return false, nil
 	}
-	for _, lb := range iss.labels(rc.Labels) {
-		key := issueKey(rc.Repo, iss.Number, lb)
+	type fire struct{ event, label string }
+	var fires []fire
+	if slices.Contains(rc.On, EventIssueOpened) {
+		fires = append(fires, fire{EventIssueOpened, ""})
+	}
+	if slices.Contains(rc.On, EventIssueLabeled) {
+		for _, lb := range iss.labels(rc.Labels) {
+			fires = append(fires, fire{EventIssueLabeled, lb})
+		}
+	}
+	for _, f := range fires {
+		key := issueKey(rc.Repo, iss.Number, f.event, f.label)
 		if w.state.has(key) {
 			continue
 		}
+		at := ""
+		if f.label != "" {
+			at = " @" + f.label
+		}
 		if w.dryRun {
-			fmt.Printf("would dispatch %s %s#%d @%s\n", EventIssueLabeled, rc.Repo, iss.Number, lb)
+			fmt.Printf("would dispatch %s %s#%d%s\n", f.event, rc.Repo, iss.Number, at)
 			w.state.remember(key)
 			continue
 		}
@@ -159,12 +173,12 @@ func (w *watcher) handleIssue(rc RepoConfig, iss issue) (bool, error) {
 			if w.dispatched >= w.cfg.MaxPerRun {
 				return true, nil
 			}
-			if err := dispatchIssue(w.client, w.cfg, rc, iss, lb); err != nil {
+			if err := dispatchIssue(w.client, w.cfg, rc, iss, f.event, f.label); err != nil {
 				// Not recorded, so the next run retries it.
-				fmt.Fprintf(os.Stderr, "awf-gh: %s#%d %s: %v\n", rc.Repo, iss.Number, EventIssueLabeled, err)
+				fmt.Fprintf(os.Stderr, "awf-gh: %s#%d %s: %v\n", rc.Repo, iss.Number, f.event, err)
 				continue
 			}
-			fmt.Printf("dispatched %s %s#%d @%s -> %s/%s\n", EventIssueLabeled, rc.Repo, iss.Number, lb, rc.Scope, rc.Workflow)
+			fmt.Printf("dispatched %s %s#%d%s -> %s/%s\n", f.event, rc.Repo, iss.Number, at, rc.Scope, rc.Workflow)
 			w.dispatched++
 		}
 		if err := w.record(key); err != nil {

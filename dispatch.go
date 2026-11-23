@@ -44,17 +44,18 @@ func post(client httpDoer, cfg *Config, rc RepoConfig, body []byte) error {
 	return nil
 }
 
-// dispatchIssue fires the workflow for one labeled issue. The issue number is
+// dispatchIssue fires the workflow for one open issue. The issue number is
 // an input, not a pull request number: the workflow decides what to do with it.
-func dispatchIssue(client httpDoer, cfg *Config, rc RepoConfig, iss issue, label string) error {
-	body, err := json.Marshal(map[string]any{
-		"inputs": map[string]any{
-			"repo":  rc.Repo,
-			"issue": strconv.Itoa(iss.Number),
-			"label": label,
-			"event": EventIssueLabeled,
-		},
-	})
+func dispatchIssue(client httpDoer, cfg *Config, rc RepoConfig, iss issue, event, label string) error {
+	inputs := map[string]any{
+		"repo":  rc.Repo,
+		"issue": strconv.Itoa(iss.Number),
+		"event": event,
+	}
+	if label != "" {
+		inputs["label"] = label
+	}
+	body, err := json.Marshal(map[string]any{"inputs": inputs})
 	if err != nil {
 		return err
 	}
