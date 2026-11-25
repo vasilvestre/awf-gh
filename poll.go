@@ -16,21 +16,24 @@ const (
 	EventReviewComment = "review-comment"
 	EventIssueOpened   = "issue-opened"
 	EventIssueLabeled  = "issue-labeled"
+	EventCommand       = "command"
 )
 
-var allEvents = []string{EventOpened, EventUpdated, EventChecksFailed, EventReviewComment, EventIssueOpened, EventIssueLabeled}
+var allEvents = []string{EventOpened, EventUpdated, EventChecksFailed, EventReviewComment, EventIssueOpened, EventIssueLabeled, EventCommand}
 
 // pr keeps only the fields the dedup key needs. Reading the body or the diff
 // is the workflow's job, not the watcher's.
 type pr struct {
-	Number            int       `json:"number"`
-	HeadRefOid        string    `json:"headRefOid"`
-	IsDraft           bool      `json:"isDraft"`
-	Author            author    `json:"author"`
-	Comments          []comment `json:"comments"`
-	Reviews           []comment `json:"reviews"`
-	Inline            []comment `json:"-"`
-	StatusCheckRollup []check   `json:"statusCheckRollup"`
+	Number     int       `json:"number"`
+	HeadRefOid string    `json:"headRefOid"`
+	IsDraft    bool      `json:"isDraft"`
+	Author     author    `json:"author"`
+	Comments   []comment `json:"comments"`
+	Reviews    []comment `json:"reviews"`
+	Inline     []comment `json:"-"`
+	// Command is the id of the newest delegation comment, set by handle.
+	Command           string  `json:"-"`
+	StatusCheckRollup []check `json:"statusCheckRollup"`
 }
 
 type author struct {
@@ -90,6 +93,9 @@ func (p pr) events(wanted []string) []string {
 	if slices.Contains(wanted, EventReviewComment) && p.answerable() {
 		out = append(out, EventReviewComment)
 	}
+	if slices.Contains(wanted, EventCommand) && p.Command != "" {
+		out = append(out, EventCommand)
+	}
 	return out
 }
 
@@ -127,14 +133,49 @@ func (p pr) answerable() bool {
 	return ok && c.Author.Login != p.Author.Login
 }
 
+// commands are the conversation comments that delegate a PR: the whole
+// trimmed body, not a substring, so a quote or a longer remark never fires.
+var commands = []string{"/dots take", "/dots stop"}
+
+// command returns the id of the newest delegation comment written by an
+// author the repo accepts. Reviews and inline comments are not read. With an
+// empty only_authors nobody qualifies, so a stranger cannot cancel a review.
+func (p pr) command(rc RepoConfig) string {
+	if len(rc.OnlyAuthors) == 0 {
+		return ""
+	}
+	var best comment
+	for _, c := range p.Comments {
+		if c.ID == "" || !slices.Contains(commands, strings.TrimSpace(c.Body)) || !rc.allows(c.Author.Login) {
+			continue
+		}
+		if best.ID == "" || !c.at().Before(best.at()) {
+			best = c
+		}
+	}
+	return best.ID
+}
+
 // ref is the dedup payload: the head commit for the commit events, the newest
 // comment for review-comment.
 func (p pr) ref(event string) string {
-	if event == EventReviewComment {
+	switch event {
+	case EventReviewComment:
 		c, _ := p.newest()
 		return c.ID
+	case EventCommand:
+		return p.Command
 	}
 	return p.HeadRefOid
+}
+
+// shown is what the log prints after @: the commit, also for command, whose
+// ref is a comment id.
+func (p pr) shown(event string) string {
+	if event == EventCommand {
+		return short(p.HeadRefOid)
+	}
+	return short(p.ref(event))
 }
 
 // eventKey is the dedup identity. pr-updated and checks-failed are keyed on

@@ -16,7 +16,8 @@ repos:
   - repo: awf-project/cli
     scope: local
     workflow: review-pr
-    on: [pr-opened, pr-updated, checks-failed]
+    on: [pr-opened, pr-updated, checks-failed, command]
+    only_authors: ["your-login"]
     ignore_authors: ["dependabot[bot]", "renovate[bot]", "github-actions[bot]"]
 
   - repo: awf-project/tower

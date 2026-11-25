@@ -225,6 +225,7 @@ func (w *watcher) handleIssue(rc RepoConfig, iss issue) (bool, error) {
 // handle processes one PR and reports whether the per-run cap was hit.
 func (w *watcher) handle(rc RepoConfig, p pr) (bool, error) {
 	firstSight := !w.state.has(seenKey(rc.Repo, p.Number))
+	p.Command = p.command(rc)
 
 	for _, ev := range p.events(rc.On) {
 		key := eventKey(rc.Repo, p.Number, ev, p.ref(ev))
@@ -240,13 +241,21 @@ func (w *watcher) handle(rc RepoConfig, p pr) (bool, error) {
 			continue
 		}
 		if w.dryRun {
-			fmt.Printf("would dispatch %s %s#%d @%s\n", ev, rc.Repo, p.Number, short(p.ref(ev)))
+			fmt.Printf("would dispatch %s %s#%d @%s\n", ev, rc.Repo, p.Number, p.shown(ev))
 			w.state.remember(key)
 			continue
 		}
 		if !w.seed {
 			if w.dispatched >= w.cfg.MaxPerRun {
 				return true, nil
+			}
+			if ev == EventCommand {
+				// An unreadable sidecar could not cancel the live review, so the
+				// command waits unrecorded for a readable one.
+				if _, lerr := w.state.loadExec(); lerr != nil && !errors.Is(lerr, errCorruptExec) {
+					fmt.Fprintf(os.Stderr, "awf-gh: %s#%d %s: exec map: %v\n", rc.Repo, p.Number, ev, lerr)
+					continue
+				}
 			}
 			id, err := dispatch(w.client, w.cfg, rc, p, ev)
 			if err != nil {
@@ -259,7 +268,7 @@ func (w *watcher) handle(rc RepoConfig, p pr) (bool, error) {
 				// next pass retries it.
 				return false, err
 			}
-			fmt.Printf("dispatched %s %s#%d @%s -> %s/%s\n", ev, rc.Repo, p.Number, short(p.ref(ev)), rc.Scope, rc.Workflow)
+			fmt.Printf("dispatched %s %s#%d @%s -> %s/%s\n", ev, rc.Repo, p.Number, p.shown(ev), rc.Scope, rc.Workflow)
 			w.dispatched++
 		}
 		if err := w.record(key); err != nil {
