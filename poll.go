@@ -139,8 +139,11 @@ var commands = []string{"/dots take", "/dots stop"}
 
 // command returns the id of the newest delegation comment written by an
 // author the repo accepts. Reviews and inline comments are not read. With an
-// empty only_authors anyone qualifies; the workflow still decides whom to obey.
+// empty only_authors nobody qualifies, so a stranger cannot cancel a review.
 func (p pr) command(rc RepoConfig) string {
+	if len(rc.OnlyAuthors) == 0 {
+		return ""
+	}
 	var best comment
 	for _, c := range p.Comments {
 		if c.ID == "" || !slices.Contains(commands, strings.TrimSpace(c.Body)) || !rc.allows(c.Author.Login) {

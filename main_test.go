@@ -892,6 +892,34 @@ func TestCommandFiresOncePerComment(t *testing.T) {
 	}
 }
 
+func TestCommandWaitsForAReadableExecFile(t *testing.T) {
+	w, doer := newTestWatcher(t)
+	rc := commandRepo()
+	me := author{Login: "me"}
+	w.record(seenKey(rc.Repo, 6))
+	p := pr{Number: 6, HeadRefOid: "sha1", Author: me, Comments: []comment{{ID: "c1", Author: me, Body: "/dots stop"}}}
+
+	if err := os.Mkdir(w.state.execPath(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.handle(rc, p); err != nil {
+		t.Fatal(err)
+	}
+	if len(doer.calls) != 0 {
+		t.Fatalf("command fired with an unreadable sidecar: %v", doer.calls)
+	}
+
+	if err := os.Remove(w.state.execPath()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.handle(rc, p); err != nil {
+		t.Fatal(err)
+	}
+	if len(doer.calls) != 1 {
+		t.Fatalf("dispatched %v, want the command retried once", doer.calls)
+	}
+}
+
 func TestCommandFirstSightAndSeedStaySilent(t *testing.T) {
 	rc := commandRepo()
 	me := author{Login: "me"}

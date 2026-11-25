@@ -249,6 +249,14 @@ func (w *watcher) handle(rc RepoConfig, p pr) (bool, error) {
 			if w.dispatched >= w.cfg.MaxPerRun {
 				return true, nil
 			}
+			if ev == EventCommand {
+				// An unreadable sidecar could not cancel the live review, so the
+				// command waits unrecorded for a readable one.
+				if _, lerr := w.state.loadExec(); lerr != nil && !errors.Is(lerr, errCorruptExec) {
+					fmt.Fprintf(os.Stderr, "awf-gh: %s#%d %s: exec map: %v\n", rc.Repo, p.Number, ev, lerr)
+					continue
+				}
+			}
 			id, err := dispatch(w.client, w.cfg, rc, p, ev)
 			if err != nil {
 				// Not recorded, so the next run retries it.
