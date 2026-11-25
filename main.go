@@ -225,6 +225,7 @@ func (w *watcher) handleIssue(rc RepoConfig, iss issue) (bool, error) {
 // handle processes one PR and reports whether the per-run cap was hit.
 func (w *watcher) handle(rc RepoConfig, p pr) (bool, error) {
 	firstSight := !w.state.has(seenKey(rc.Repo, p.Number))
+	p.Command = p.command(rc)
 
 	for _, ev := range p.events(rc.On) {
 		key := eventKey(rc.Repo, p.Number, ev, p.ref(ev))
@@ -240,7 +241,7 @@ func (w *watcher) handle(rc RepoConfig, p pr) (bool, error) {
 			continue
 		}
 		if w.dryRun {
-			fmt.Printf("would dispatch %s %s#%d @%s\n", ev, rc.Repo, p.Number, short(p.ref(ev)))
+			fmt.Printf("would dispatch %s %s#%d @%s\n", ev, rc.Repo, p.Number, p.shown(ev))
 			w.state.remember(key)
 			continue
 		}
@@ -259,7 +260,7 @@ func (w *watcher) handle(rc RepoConfig, p pr) (bool, error) {
 				// next pass retries it.
 				return false, err
 			}
-			fmt.Printf("dispatched %s %s#%d @%s -> %s/%s\n", ev, rc.Repo, p.Number, short(p.ref(ev)), rc.Scope, rc.Workflow)
+			fmt.Printf("dispatched %s %s#%d @%s -> %s/%s\n", ev, rc.Repo, p.Number, p.shown(ev), rc.Scope, rc.Workflow)
 			w.dispatched++
 		}
 		if err := w.record(key); err != nil {

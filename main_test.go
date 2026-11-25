@@ -838,3 +838,109 @@ func TestIssueLabelNeedsALabel(t *testing.T) {
 		t.Fatal("issue-labeled without labels passed validation")
 	}
 }
+
+func commandRepo() RepoConfig {
+	return RepoConfig{Repo: "o/r", Workflow: "review-pr", On: []string{EventCommand}, OnlyAuthors: []string{"me"}}
+}
+
+func TestCommandFiresOncePerComment(t *testing.T) {
+	w, doer := newTestWatcher(t)
+	rc := commandRepo()
+	me := author{Login: "me"}
+	p := pr{Number: 3, HeadRefOid: "sha1", Author: me}
+	w.record(seenKey(rc.Repo, 3))
+
+	// Not commands: extra text, embedded in a longer comment, wrong author,
+	// a review body.
+	p.Comments = []comment{
+		{ID: "c1", Author: me, Body: "/dots take now"},
+		{ID: "c2", Author: me, Body: "please\n/dots take\nthanks"},
+		{ID: "c3", Author: author{Login: "other"}, Body: "/dots take"},
+	}
+	p.Reviews = []comment{{ID: "r1", Author: me, Body: "/dots take"}}
+	p.Inline = []comment{{ID: "i1", Author: me, Body: "/dots take"}}
+	if _, err := w.handle(rc, p); err != nil {
+		t.Fatal(err)
+	}
+	if len(doer.calls) != 0 {
+		t.Fatalf("non-command fired: %v", doer.calls)
+	}
+
+	p.Comments = append(p.Comments, comment{ID: "c4", Author: me, Body: " /dots take\r\n"})
+	for i := 0; i < 2; i++ {
+		if _, err := w.handle(rc, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(doer.calls) != 1 || !strings.Contains(doer.calls[0], `"event":"command"`) || !strings.Contains(doer.calls[0], `"sha":"sha1"`) {
+		t.Fatalf("dispatched %v, want one command on sha1", doer.calls)
+	}
+
+	p.Comments = append(p.Comments, comment{ID: "c5", Author: me, Body: "/dots stop"})
+	if _, err := w.handle(rc, p); err != nil {
+		t.Fatal(err)
+	}
+	if len(doer.calls) != 2 {
+		t.Fatalf("/dots stop dispatched %d times, want 2 total", len(doer.calls))
+	}
+	p.Command = p.command(rc)
+	if key := eventKey("o/r", 3, EventCommand, p.ref(EventCommand)); key != "o/r#3#command@c5" {
+		t.Fatalf("key %q", key)
+	}
+	if len(doer.deleted) != 1 || doer.deleted[0] != "/api/executions/exec-1" {
+		t.Fatalf("command did not supersede the previous run: %v", doer.deleted)
+	}
+}
+
+func TestCommandFirstSightAndSeedStaySilent(t *testing.T) {
+	rc := commandRepo()
+	me := author{Login: "me"}
+	p := pr{Number: 4, HeadRefOid: "sha1", Author: me, Comments: []comment{{ID: "c1", Author: me, Body: "/dots take"}}}
+
+	w, doer := newTestWatcher(t)
+	if _, err := w.handle(rc, p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.handle(rc, p); err != nil {
+		t.Fatal(err)
+	}
+	if len(doer.calls) != 0 {
+		t.Fatalf("first sight fired a command: %v", doer.calls)
+	}
+
+	w, doer = newTestWatcher(t)
+	w.seed = true
+	if _, err := w.handle(rc, p); err != nil {
+		t.Fatal(err)
+	}
+	w.seed = false
+	if _, err := w.handle(rc, p); err != nil {
+		t.Fatal(err)
+	}
+	if len(doer.calls) != 0 {
+		t.Fatalf("seeded command fired: %v", doer.calls)
+	}
+}
+
+func TestCommandDryRunLine(t *testing.T) {
+	w, _ := newTestWatcher(t)
+	w.dryRun = true
+	rc := commandRepo()
+	me := author{Login: "me"}
+	w.record(seenKey(rc.Repo, 5))
+	p := pr{Number: 5, HeadRefOid: "abcdef1234", Author: me, Comments: []comment{{ID: "c1", Author: me, Body: "/dots take"}}}
+
+	r, wr, _ := os.Pipe()
+	old := os.Stdout
+	os.Stdout = wr
+	_, err := w.handle(rc, p)
+	wr.Close()
+	os.Stdout = old
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := io.ReadAll(r)
+	if got, want := string(out), "would dispatch command o/r#5 @abcdef1\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}

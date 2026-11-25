@@ -53,6 +53,14 @@ Events:
 - `review-comment`: the newest comment on the PR is not written by the PR
   author. The event fires once per comment id, so your own reply ends the
   streak and the same comment never fires twice.
+- `command`: the newest conversation comment whose whole trimmed body is
+  `/dots take` or `/dots stop`, written by a `only_authors` login (anyone when
+  the list is empty, so set it; the workflow decides whom to obey). Reviews
+  and inline comments are not read. It fires once per comment id and carries
+  the current head commit as `sha`, so a delegation starts a run without a
+  push. It shares the review slot, so it cancels a live review of the same PR.
+  A PR seen for the first time, and `--seed`, record existing commands without
+  firing them.
 - `issue-opened`: an open issue not yet dispatched for this event. It needs no
   label, so a repository where every issue is yours needs no hand labelling.
   Run `--seed` once after adding the rule, so the issues that already exist are
